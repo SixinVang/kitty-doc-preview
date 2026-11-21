@@ -23,6 +23,12 @@ use std::time::{Duration, Instant};
 
 const DEBOUNCE: Duration = Duration::from_millis(15);
 const SETTLE: Duration = Duration::from_millis(100);
+/// Scroll animation: one cell-row per frame is the smallest step the terminal
+/// grid can show, so this only softens small scrolls (keys, wheel), never
+/// page turns. Rows that are not already cached snap instead.
+const GLIDE_FRAME: Duration = Duration::from_millis(12);
+const GLIDE_MS_PER_ROW: u64 = 12;
+const GLIDE_MAX_ROWS: usize = 24;
 
 /// Rows per raster tile. Big enough to amortise PNG encoding and protocol
 /// overhead, small enough that a scroll crossing a tile boundary renders one
@@ -61,6 +67,14 @@ struct Tile {
     used: u64,
     /// Decoded size (cols * cell_w * rows * cell_h) for the cache budget.
     px: u64,
+}
+
+/// A short cell-row glide for keyboard/wheel scrolling.
+struct Glide {
+    from: f32,
+    to: f32,
+    started: Instant,
+    dur: Duration,
 }
 
 enum Req {
@@ -181,6 +195,7 @@ pub fn run(path: &Path, mut caps: Caps, theme: Theme, start_page: Option<usize>)
         req_tx,
         rep_rx,
         settle_until: None,
+        glide: None,
         cell_dirty: false,
         edit_started: None,
         latency: None,
@@ -262,6 +277,7 @@ struct App {
     req_tx: Sender<Req>,
     rep_rx: Receiver<Rep>,
     settle_until: Option<Instant>,
+    glide: Option<Glide>,
     /// A resize arrived; the terminal cell size may have changed (font size,
     /// or the pane finally got its real layout). Re-probe when it settles.
     cell_dirty: bool,
@@ -279,7 +295,11 @@ impl App {
         let mut reload_at: Option<Instant> = None;
         loop {
             let now = Instant::now();
-            let deadline = [reload_at, self.settle_until].into_iter().flatten().min();
+            let frame = self.glide.as_ref().map(|_| now + GLIDE_FRAME);
+            let deadline = [reload_at, self.settle_until, frame]
+                .into_iter()
+                .flatten()
+                .min();
             let timeout = deadline
                 .map(|d| d.saturating_duration_since(now))
                 .unwrap_or(Duration::from_secs(3600));
@@ -315,6 +335,9 @@ impl App {
             if reload_at.is_some_and(|t| t <= Instant::now()) {
                 reload_at = None;
                 self.request_reload();
+            }
+            if self.advance_glide() {
+                repaint = true;
             }
             if self.settle_until.is_some_and(|t| t <= Instant::now()) {
                 self.settle_until = None;
@@ -468,8 +491,8 @@ impl App {
             Event::Key(k) if k.kind != KeyEventKind::Release => self.key(screen, k, repaint),
             Event::Mouse(m) => {
                 match m.kind {
-                    MouseEventKind::ScrollDown => self.scroll(3, repaint),
-                    MouseEventKind::ScrollUp => self.scroll(-3, repaint),
+                    MouseEventKind::ScrollDown => self.scroll(3, true, repaint),
+                    MouseEventKind::ScrollUp => self.scroll(-3, true, repaint),
                     MouseEventKind::ScrollLeft => {
                         let step = self.page_cols() as isize / 4;
                         self.pan(-step, repaint);
@@ -483,6 +506,7 @@ impl App {
                 false
             }
             Event::Resize(..) => {
+                self.glide = None;
                 screen.resize();
                 self.cols = screen.caps.cols;
                 self.rows = screen.caps.rows;
@@ -511,20 +535,22 @@ impl App {
         match k.code {
             KeyCode::Char('q') | KeyCode::Esc => return true,
             KeyCode::Char('c') if ctrl => return true,
-            KeyCode::Char('j') | KeyCode::Down | KeyCode::Enter => self.scroll(1, repaint),
-            KeyCode::Char('k') | KeyCode::Up => self.scroll(-1, repaint),
-            KeyCode::Char('d') => self.scroll(page / 2, repaint),
-            KeyCode::Char('u') => self.scroll(-(page / 2), repaint),
-            KeyCode::Char('f') if ctrl => self.scroll(page - 2, repaint),
-            KeyCode::Char('b') if ctrl => self.scroll(-(page - 2), repaint),
-            KeyCode::Char(' ') | KeyCode::PageDown => self.scroll(page - 2, repaint),
-            KeyCode::Char('b') | KeyCode::PageUp => self.scroll(-(page - 2), repaint),
+            KeyCode::Char('j') | KeyCode::Down | KeyCode::Enter => self.scroll(1, true, repaint),
+            KeyCode::Char('k') | KeyCode::Up => self.scroll(-1, true, repaint),
+            KeyCode::Char('d') => self.scroll(page / 2, false, repaint),
+            KeyCode::Char('u') => self.scroll(-(page / 2), false, repaint),
+            KeyCode::Char('f') if ctrl => self.scroll(page - 2, false, repaint),
+            KeyCode::Char('b') if ctrl => self.scroll(-(page - 2), false, repaint),
+            KeyCode::Char(' ') | KeyCode::PageDown => self.scroll(page - 2, false, repaint),
+            KeyCode::Char('b') | KeyCode::PageUp => self.scroll(-(page - 2), false, repaint),
             KeyCode::Char('g') | KeyCode::Home => {
+                self.glide = None;
                 self.top = 0;
                 self.follow = false;
                 *repaint = true;
             }
             KeyCode::Char('G') | KeyCode::End => {
+                self.glide = None;
                 self.top = self.max_top();
                 self.follow = true;
                 *repaint = true;
@@ -544,6 +570,7 @@ impl App {
             KeyCode::Char(c @ '1'..='9') => {
                 let d = c as usize - '0' as usize;
                 let p = (self.meta.pages * d / 10).min(self.meta.pages - 1);
+                self.glide = None;
                 self.top = self.starts[p];
                 self.follow = false;
                 *repaint = true;
@@ -558,17 +585,98 @@ impl App {
         false
     }
 
-    fn scroll(&mut self, by: isize, repaint: &mut bool) {
+    fn scroll(&mut self, by: isize, animate: bool, repaint: &mut bool) {
         let max = self.max_top();
-        let top = (self.top as isize + by).clamp(0, max as isize) as usize;
-        if top != self.top {
-            self.top = top;
-            *repaint = true;
+        // Retarget from the pending destination so repeated keys accumulate
+        // instead of restarting the glide on every press.
+        let base = self
+            .glide
+            .as_ref()
+            .map(|g| g.to.round() as isize)
+            .unwrap_or(self.top as isize);
+        let target = (base + by).clamp(0, max as isize);
+        if target == base && self.glide.is_none() {
+            return;
         }
-        self.follow = self.top == max && by > 0;
+        self.follow = target as usize == max && by > 0;
+        if animate && by.unsigned_abs() <= GLIDE_MAX_ROWS && self.tiles_ready(target as usize) {
+            let from = self.top as f32;
+            let ms = (by.unsigned_abs() as u64 * GLIDE_MS_PER_ROW).clamp(40, 180);
+            self.glide = Some(Glide {
+                from,
+                to: target as f32,
+                started: Instant::now(),
+                dur: Duration::from_millis(ms),
+            });
+        } else {
+            self.glide = None;
+            self.top = target as usize;
+        }
+        *repaint = true;
+    }
+
+    /// Step the scroll animation. Returns true when the view changed.
+    fn advance_glide(&mut self) -> bool {
+        let Some(g) = &self.glide else {
+            return false;
+        };
+        let t = (g.started.elapsed().as_secs_f32() / g.dur.as_secs_f32()).clamp(0.0, 1.0);
+        // Linear keeps the 32px steps evenly spaced; ease-out front-loads a
+        // short glide into one or two frames, which reads as a jump.
+        let top = (g.from + (g.to - g.from) * t).round() as usize;
+        if t >= 1.0 {
+            self.top = g.to.round() as usize;
+            self.glide = None;
+            return true;
+        }
+        let changed = top != self.top;
+        self.top = top;
+        if changed {
+            if let Some(path) = std::env::var_os("DOCP_TRACE") {
+                use std::io::Write as _;
+                if let Ok(mut f) = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(path)
+                {
+                    let _ = writeln!(f, "glide top={top} t={t:.2}");
+                }
+            }
+        }
+        changed
+    }
+
+    /// Are all tiles for the viewport at `target` already in the cache?
+    fn tiles_ready(&self, target: usize) -> bool {
+        let body = self.view_height();
+        let end = (target + body).min(self.total);
+        if end <= target {
+            return true;
+        }
+        let first = self.page_at(target);
+        let last = self.page_at(end - 1);
+        for p in first..=last {
+            let ps = self.starts[p];
+            let pe = ps + self.page_rows[p];
+            let lo = target.max(ps);
+            let hi = end.min(pe);
+            if lo >= hi {
+                continue;
+            }
+            let r0 = lo - ps;
+            let r1 = hi - ps;
+            for idx in (r0 / TILE_ROWS)..=(r1 - 1) / TILE_ROWS {
+                let key = self.tile_key(p, idx * TILE_ROWS);
+                if !self.tiles.contains_key(&key) {
+                    return false;
+                }
+            }
+        }
+        true
     }
 
     fn turn_page(&mut self, by: isize, repaint: &mut bool) {
+        self.glide = None;
         let p = self.page_at(self.top) as isize + by;
         let p = p.clamp(0, self.meta.pages as isize - 1) as usize;
         if self.starts[p] != self.top {
@@ -595,6 +703,7 @@ impl App {
             return;
         }
         let (p, frac) = self.anchor();
+        self.glide = None;
         let center = self.x_frac + 0.5 / ZOOMS[self.zoom];
         self.zoom = zoom;
         self.x_frac = center - 0.5 / ZOOMS[self.zoom];
@@ -711,6 +820,7 @@ impl App {
                 match result {
                     Ok(meta) if meta.pages > 0 => {
                         let (p, frac) = self.anchor();
+                        self.glide = None;
                         self.meta = meta;
                         self.clear_tiles();
                         self.layout();
