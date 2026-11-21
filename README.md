@@ -49,7 +49,9 @@ Keys: `j/k` scroll · `space/b` page · `d/u` half page · `g/G` top/bottom
 
 PDF adds: `n/p` (or `]`/`[`) next/previous page · `1`–`9` jump to 10 %…90 % ·
 `z`/`Z` zoom in/out (re-rasterised, never upscaled) · `h/l` pan when zoomed ·
-`r` reopen. Page number sits in the left gutter and in the status bar.
+`Option+J/K` instant 5-row jumps (the old non-animated feel) · `r` reopen.
+Scroll with `j/k`/wheel is pixel-smooth. Page number sits in the left gutter
+and in the status bar.
 
 ## What it does
 

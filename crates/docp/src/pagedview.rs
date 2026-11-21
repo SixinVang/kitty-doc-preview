@@ -29,6 +29,9 @@ const SETTLE: Duration = Duration::from_millis(100);
 const GLIDE_FRAME: Duration = Duration::from_millis(10);
 const GLIDE_MS_PER_ROW: u64 = 28;
 const GLIDE_MAX_ROWS: usize = 24;
+/// Option+j/k: the pre-smooth behaviour — a bigger step shown immediately,
+/// with no glide, for fast skimming.
+const FAST_STEP: isize = 5;
 /// Placement id reused for every tile image; (image id, placement id) is the
 /// terminal-side key, so re-placing the same pair updates in place.
 const PLACEMENT: u32 = 1;
@@ -558,11 +561,24 @@ impl App {
     }
 
     fn key(&mut self, screen: &mut Screen, k: KeyEvent, repaint: &mut bool) -> bool {
+        if let Some(path) = std::env::var_os("DOCP_TRACE") {
+            use std::io::Write as _;
+            if let Ok(mut f) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path)
+            {
+                let _ = writeln!(f, "key {:?} mods={:?}", k.code, k.modifiers);
+            }
+        }
         let page = self.view_height() as isize;
         let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
+        let alt = k.modifiers.contains(KeyModifiers::ALT);
         match k.code {
             KeyCode::Char('q') | KeyCode::Esc => return true,
             KeyCode::Char('c') if ctrl => return true,
+            KeyCode::Char('j') if alt => self.scroll(FAST_STEP, false, repaint),
+            KeyCode::Char('k') if alt => self.scroll(-FAST_STEP, false, repaint),
             KeyCode::Char('j') | KeyCode::Down | KeyCode::Enter => self.scroll(1, true, repaint),
             KeyCode::Char('k') | KeyCode::Up => self.scroll(-1, true, repaint),
             KeyCode::Char('d') => self.scroll(page / 2, false, repaint),

@@ -235,7 +235,7 @@ trait PdfBackend {          // 抽象留给未来 pdfium 备胎，先只写 mupd
 j/k ↑↓ 滚动          space/b 翻页/半页       d/u 半页
 g/G 首/尾(G=跟随尾)   [/]  md:上/下标题  pdf:上/下页
 n/p  pdf:下/上一页    1-9  跳到 10%..90%    z/Z 缩放(pdf)
-h/l  pdf:水平平移(缩放后)
+h/l  pdf:水平平移(缩放后)   option+j/k pdf:5 行瞬时跳转(不平滑)
 /   搜索   n/N 次匹配  t  目录(pdf)         o  打开链接
 y   复制选择(OSC52)    r  强制重载           ctrl-r 重绘
 +/-  md: 内容宽度      q  退出               ?  帮助浮层
