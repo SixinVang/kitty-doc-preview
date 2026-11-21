@@ -29,7 +29,8 @@ pub struct Viewer {
     out: Vec<u8>,
 }
 
-pub fn run(file: &Path, caps: Caps) -> Result<()> {
+pub fn run(file: &Path, mut caps: Caps) -> Result<()> {
+    crate::caps::settle(&mut caps);
     let src = render_img::load(file)?;
     let mut v = Viewer {
         file: file.to_path_buf(),
@@ -233,8 +234,12 @@ impl Viewer {
                     _ => continue,
                 },
                 Event::Resize(..) => {
+                    // The main thread owns the tty here, so probing directly
+                    // cannot race an event reader.
+                    if let Some(cell) = crate::caps::probe_cell(300) {
+                        screen.caps.cell = cell;
+                    }
                     self.rebuild(screen, true);
-                    continue;
                 }
                 _ => continue,
             }

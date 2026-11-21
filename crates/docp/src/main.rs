@@ -2,6 +2,7 @@ mod caps;
 mod cat;
 mod config;
 mod imgview;
+mod input;
 mod mdview;
 mod pagedview;
 mod screen;

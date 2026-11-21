@@ -4,9 +4,12 @@
 //! Layout is pure geometry (page sizes in points + zoom); pixels arrive later
 //! as tiles from a dedicated render thread that owns the non-`Sync` MuPDF
 //! document. Only the visible tiles (plus a small prefetch) are rasterised,
-//! and the cache is bounded by both tile count and decoded pixel area.
+//! and the cache is bounded by both tile count and decoded pixel area. The
+//! cell size is re-synced after resizes: a tile's pixel aspect must match its
+//! c*r placement or the terminal letterboxes it (visible as background bands).
 
 use crate::caps::Caps;
+use crate::input::Input;
 use crate::screen::{Frame, Screen};
 use anyhow::{bail, Context, Result};
 use crossbeam_channel::{select, unbounded, Receiver, Sender};
@@ -127,7 +130,8 @@ fn worker(rx: Receiver<Req>, tx: Sender<Rep>) {
     }
 }
 
-pub fn run(path: &Path, caps: Caps, theme: Theme, start_page: Option<usize>) -> Result<()> {
+pub fn run(path: &Path, mut caps: Caps, theme: Theme, start_page: Option<usize>) -> Result<()> {
+    crate::caps::settle(&mut caps);
     let path = std::fs::canonicalize(path).context("canonicalize")?;
     let name = path
         .file_name()
@@ -177,6 +181,7 @@ pub fn run(path: &Path, caps: Caps, theme: Theme, start_page: Option<usize>) -> 
         req_tx,
         rep_rx,
         settle_until: None,
+        cell_dirty: false,
         edit_started: None,
         latency: None,
         last_ms: None,
@@ -200,16 +205,7 @@ pub fn run(path: &Path, caps: Caps, theme: Theme, start_page: Option<usize>) -> 
         prev_hook(info);
     }));
 
-    let (input_tx, input_rx) = unbounded();
-    std::thread::Builder::new()
-        .name("input".into())
-        .spawn(move || {
-            while let Ok(ev) = crossterm::event::read() {
-                if input_tx.send(ev).is_err() {
-                    return;
-                }
-            }
-        })?;
+    let input = Input::spawn()?;
 
     let (fs_tx, fs_rx) = unbounded::<()>();
     let file = path.clone();
@@ -231,7 +227,7 @@ pub fn run(path: &Path, caps: Caps, theme: Theme, start_page: Option<usize>) -> 
 
     let result = app
         .paint(&mut screen)
-        .and_then(|_| app.event_loop(&mut screen, input_rx, fs_rx));
+        .and_then(|_| app.event_loop(&mut screen, &input, fs_rx));
     app.cleanup();
     crate::screen::leave();
     result
@@ -266,6 +262,9 @@ struct App {
     req_tx: Sender<Req>,
     rep_rx: Receiver<Rep>,
     settle_until: Option<Instant>,
+    /// A resize arrived; the terminal cell size may have changed (font size,
+    /// or the pane finally got its real layout). Re-probe when it settles.
+    cell_dirty: bool,
     edit_started: Option<Instant>,
     latency: Option<Duration>,
     last_ms: Option<f32>,
@@ -274,13 +273,9 @@ struct App {
 }
 
 impl App {
-    fn event_loop(
-        &mut self,
-        screen: &mut Screen,
-        input: Receiver<Event>,
-        fs: Receiver<()>,
-    ) -> Result<()> {
+    fn event_loop(&mut self, screen: &mut Screen, input: &Input, fs: Receiver<()>) -> Result<()> {
         let reps = self.rep_rx.clone();
+        let events = input.events.clone();
         let mut reload_at: Option<Instant> = None;
         loop {
             let now = Instant::now();
@@ -292,7 +287,7 @@ impl App {
             let mut quit = false;
 
             select! {
-                recv(input) -> ev => match ev {
+                recv(events) -> ev => match ev {
                     Ok(ev) => quit |= self.on_input(screen, ev, &mut repaint),
                     Err(_) => return Ok(()),
                 },
@@ -303,7 +298,7 @@ impl App {
                 recv(reps) -> r => if let Ok(r) = r { repaint |= self.on_done(screen, r); },
                 default(timeout) => {},
             }
-            while let Ok(ev) = input.try_recv() {
+            while let Ok(ev) = events.try_recv() {
                 quit |= self.on_input(screen, ev, &mut repaint);
             }
             while fs.try_recv().is_ok() {
@@ -323,6 +318,20 @@ impl App {
             }
             if self.settle_until.is_some_and(|t| t <= Instant::now()) {
                 self.settle_until = None;
+                if self.cell_dirty {
+                    self.cell_dirty = false;
+                    if let Some(cell) = input.cell(Duration::from_millis(300)) {
+                        if cell != (self.cell.0 as u16, self.cell.1 as u16) {
+                            let (p, frac) = self.anchor();
+                            self.cell = (cell.0 as u32, cell.1 as u32);
+                            screen.caps.cell = cell;
+                            self.clear_tiles();
+                            self.layout();
+                            self.restore(p, frac);
+                            screen.invalidate();
+                        }
+                    }
+                }
                 repaint = true;
             }
             if repaint {
@@ -487,6 +496,7 @@ impl App {
                 self.layout();
                 self.restore(p, frac);
                 self.settle_until = Some(Instant::now() + SETTLE);
+                self.cell_dirty = true;
                 screen.invalidate();
                 *repaint = true;
                 false

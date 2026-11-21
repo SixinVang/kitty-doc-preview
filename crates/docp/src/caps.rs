@@ -168,6 +168,52 @@ fn probe_file_transfer() -> bool {
     ok
 }
 
+/// Query just the cell size (`CSI 16t`), terminated by DA1.
+pub fn probe_cell(timeout_ms: u64) -> Option<(u16, u16)> {
+    let mut q = Vec::new();
+    q.extend_from_slice(b"\x1b[16t");
+    q.extend_from_slice(kgp::DA1);
+    let buf = termui::query_tty(&q, termui::Stop::Da1, Duration::from_millis(timeout_ms)).ok()?;
+    kgp::parse_probe(&buf, None).cell
+}
+
+/// Wait for the pane to be laid out, then re-read its size and cell.
+///
+/// Rex creates a new pane at 80x24 with a placeholder cell size and resizes it
+/// a few milliseconds later. Probing before that settle leaves the view with a
+/// cell size that does not match the pixels the terminal actually uses, and
+/// image placements then get letterboxed (a tile looks `c*r` cells but its
+/// pixels have the wrong aspect, so the terminal leaves bands of background).
+/// Only `CSI 16t` is trusted here: the winsize ioctl's pixel fields can
+/// describe the whole window in a split pane.
+pub fn settle(caps: &mut Caps) {
+    let key = |ws: &termui::Winsize| (ws.cols.max(1), ws.rows.max(1));
+    let mut last = termui::tty_winsize().ok().map(|w| key(&w));
+    let started = std::time::Instant::now();
+    let mut stable = std::time::Instant::now();
+    while started.elapsed() < Duration::from_millis(250) {
+        std::thread::sleep(Duration::from_millis(10));
+        let now = termui::tty_winsize().ok().map(|w| key(&w));
+        if now != last {
+            last = now;
+            stable = std::time::Instant::now();
+        } else if stable.elapsed() >= Duration::from_millis(30) {
+            break;
+        }
+    }
+    if let Ok(ws) = termui::tty_winsize() {
+        caps.rows = ws.rows.max(1);
+        caps.cols = ws.cols.max(1);
+    }
+    if let Some(cell) = probe_cell(200) {
+        trace_caps(&format!(
+            "settled cell={cell:?} pane={}x{}",
+            caps.cols, caps.rows
+        ));
+        caps.cell = cell;
+    }
+}
+
 /// Reload rows/cols (e.g. after a resize event).
 pub fn refresh_size(caps: &mut Caps) {
     if let Ok(ws) = termui::tty_winsize() {

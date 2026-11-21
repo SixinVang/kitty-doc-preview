@@ -274,6 +274,7 @@ docp bench <file>           # headless 计时
 | Rex 对 `t=f` 文件传输、`a=f` 动画帧支持未知 | 启动特性探测，全部有 `t=d`/无动画 fallback |
 | mupdf 单线程渲染成为瓶颈 | 先测（2170×2048 tile 10–15 ms，够用）；必要时多 Document 实例分片 |
 | mupdf 自带 MuJS 与 rquickjs 符号冲突 | 关闭 `mupdf` 默认 feature（`js`），见 §5.3；Mermaid 回归验证 |
+| Rex 先给新 pane 一个 80×24 / 8×16 的占位尺寸，随后才布局成真实尺寸；cell 探测早于布局时，tile 像素纵横比与 placement 不一致，终端按比例缩放会 letterbox（页中间出现一条背景灰带） | `caps::settle()` 在进入界面前等 winsize 稳定并重探 `CSI 16t`；运行中 resize 防抖后由唯一的 tty 读线程 `input::Input::cell()` 重探（避免与键盘读取抢应答），imgview 在主线程直接重探 |
 | 大页深缩放 tile 数量爆炸 | 固定 64 行 tile + 像素预算淘汰；只光栅化可见矩形 |
 | CJK 在 SGR 文本路径的宽度歧义（emoji/组合字） | unicode-width + 实测校正表；文本路径可复制优先于完美对齐 |
 | mupdf-sys 构建慢（首次 ~2min） | 接受；CI 缓存 |

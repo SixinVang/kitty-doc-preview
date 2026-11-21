@@ -2,6 +2,7 @@
 //! scrolling, block-level diffing.
 
 use crate::caps::Caps;
+use crate::input::Input;
 use crate::screen::{Frame, Screen};
 use crossbeam_channel::{select, unbounded, Receiver, Sender};
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEventKind};
@@ -95,6 +96,9 @@ pub struct App {
 
     changed: HashMap<usize, Instant>,
     settle_until: Option<Instant>,
+    /// A resize arrived; re-probe the cell when it settles (font size changes
+    /// and a pane's first real layout both alter it).
+    cell_dirty: bool,
     edit_started: Option<Instant>,
     latency: Option<Duration>,
     message: Option<String>,
@@ -102,7 +106,8 @@ pub struct App {
     out: Vec<u8>,
 }
 
-pub fn run(path: &Path, caps: Caps, theme: Theme, max_width: usize) -> anyhow::Result<()> {
+pub fn run(path: &Path, mut caps: Caps, theme: Theme, max_width: usize) -> anyhow::Result<()> {
+    crate::caps::settle(&mut caps);
     let path = std::fs::canonicalize(path)?;
     render_md::fonts::warm_system();
     let (pele_tx, pele_rx) = unbounded();
@@ -141,6 +146,7 @@ pub fn run(path: &Path, caps: Caps, theme: Theme, max_width: usize) -> anyhow::R
         done_tx,
         changed: HashMap::new(),
         settle_until: None,
+        cell_dirty: false,
         edit_started: Some(Instant::now()),
         latency: None,
         message: None,
@@ -158,16 +164,7 @@ pub fn run(path: &Path, caps: Caps, theme: Theme, max_width: usize) -> anyhow::R
         prev_hook(info);
     }));
 
-    let (input_tx, input_rx) = unbounded();
-    std::thread::Builder::new()
-        .name("input".into())
-        .spawn(move || {
-            while let Ok(ev) = crossterm::event::read() {
-                if input_tx.send(ev).is_err() {
-                    return;
-                }
-            }
-        })?;
+    let input = Input::spawn()?;
 
     let (fs_tx, fs_rx) = unbounded::<()>();
     let file = path.clone();
@@ -188,7 +185,7 @@ pub fn run(path: &Path, caps: Caps, theme: Theme, max_width: usize) -> anyhow::R
     )?;
 
     app.reload(&mut screen);
-    let result = app.event_loop(&mut screen, input_rx, fs_rx, pele_rx, done_rx);
+    let result = app.event_loop(&mut screen, &input, fs_rx, pele_rx, done_rx);
     app.cleanup();
     crate::screen::leave();
     result
@@ -198,11 +195,12 @@ impl App {
     fn event_loop(
         &mut self,
         screen: &mut Screen,
-        input: Receiver<Event>,
+        input: &Input,
         fs: Receiver<()>,
         pele: Receiver<pele::Response>,
         done: Receiver<Done>,
     ) -> anyhow::Result<()> {
+        let events = input.events.clone();
         let mut reload_at: Option<Instant> = None;
         loop {
             let now = Instant::now();
@@ -218,7 +216,7 @@ impl App {
             let mut quit = false;
 
             select! {
-                recv(input) -> ev => match ev {
+                recv(events) -> ev => match ev {
                     Ok(ev) => quit |= self.on_input(screen, ev, &mut relayout, &mut repaint),
                     Err(_) => return Ok(()),
                 },
@@ -230,7 +228,7 @@ impl App {
                 recv(done) -> d => if let Ok(d) = d { relayout |= self.on_done(d); },
                 default(timeout) => {},
             }
-            while let Ok(ev) = input.try_recv() {
+            while let Ok(ev) = events.try_recv() {
                 quit |= self.on_input(screen, ev, &mut relayout, &mut repaint);
             }
             while fs.try_recv().is_ok() {
@@ -255,6 +253,19 @@ impl App {
             }
             if self.settle_until.is_some_and(|t| t <= now) {
                 self.settle_until = None;
+                if self.cell_dirty {
+                    self.cell_dirty = false;
+                    if let Some(cell) = input.cell(Duration::from_millis(300)) {
+                        if (cell.0 as u32, cell.1 as u32) != (self.cell.w, self.cell.h) {
+                            self.cell = PixelCell {
+                                w: cell.0 as u32,
+                                h: cell.1 as u32,
+                            };
+                            screen.caps.cell = cell;
+                            screen.invalidate();
+                        }
+                    }
+                }
                 relayout = true;
             }
             let before = self.changed.len();
@@ -318,6 +329,7 @@ impl App {
                 );
                 self.cell = PixelCell { w: cw, h: ch };
                 self.settle_until = Some(Instant::now() + SETTLE);
+                self.cell_dirty = true;
                 *relayout = true;
                 false
             }
