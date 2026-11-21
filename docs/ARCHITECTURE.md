@@ -205,6 +205,37 @@ trait PdfBackend {          // 抽象留给未来 pdfium 备胎，先只写 mupd
 - **复制**：SGR 1006 鼠标 + PageText 命中做字符级选择（选择高亮同样画进 tile），`y` → OSC52 剪贴板
 - **大纲**：`t` 弹出目录浮层（文本行，回车跳转）
 
+### 5.4 编辑器同步（Neovim + Rex）
+
+预览是 IPC 服务端，插件是客户端，双方用 Unix socket 上的行分隔 JSON：
+
+```jsonc
+// 编辑器 -> 预览
+{"v":1,"type":"sync","line":42}     // 视口顶部的源码行（1-based）
+{"v":1,"type":"close"}
+// 预览 -> 编辑器
+{"v":1,"type":"ready"}
+{"v":1,"type":"top","line":42,"block":7}
+```
+
+- `docp --ipc <socket> file.md`：仅 Markdown；每次解析保存 `line_starts`，
+  `Block.src` 存 pulldown-cmark 的顶层字节范围（`render-md/src/doc.rs`）。
+  `docp/src/srcmap.rs` 提供 byte ↔ line、`line -> block`（落在空隙时回退到前一块）
+  与 `block -> line`。
+- 映射只按**源码行**保存，不缓存块下标：重载会重建 `blocks`/`starts`。
+- v1 是**块粒度**：编辑器的行落到包含它的块，预览跳到 `starts[block]`；
+  预览上报的是视口顶部块的起始行。块内的富文本/列表会比编辑器略粗，
+  这是已知近似（代码块一行一行的精确映射留到 v2）。
+- 防回环：编辑器驱动的滚动置 `ipc_scroll`，不回发 `top`；插件应用 `top`
+  后设 `applying_until`（默认 120ms），这段时间内的 `WinScrolled` 不再上报。
+  本地按键/滚轮会清除 `ipc_scroll`，因此预览端操作总是"赢"。
+- 发送节流 33ms 且按行去重；重载后不主动发 `top`（保存来自编辑器，
+  插件在 `BufWritePost` 后重发当前行）。
+- 线程：socket 读取在专属线程，事件经 channel 进主循环；终端写仍只在主线程。
+  `close`/EOF 只丢弃客户端，预览继续运行，插件可以重连。
+- socket 路径由插件生成（`stdpath("run") .. "/docp-<bufnr>.sock"`），预览启动时
+  清理陈旧文件、退出时删除。
+
 ## 6. 并发模型
 
 ```
@@ -216,6 +247,7 @@ trait PdfBackend {          // 抽象留给未来 pdfium 备胎，先只写 mupd
 ```
 
 - 所有终端写只在主线程（画笔独占 stdout）
+- 编辑器同步的 socket 读线程只解析消息并通过 channel 唤醒主循环
 - Engine 不持有终端句柄 → `docp bench` 与未来 `docp serve`（daemon，M4+）复用同一引擎
 
 ## 7. 缓存
@@ -291,5 +323,6 @@ docp bench <file>           # headless 计时
 - **M1**：render-md 全量（tkmp 迁移 + syntect + 表格 CJK）+ watch + cat 模式
 - **M2**（已完成）：render-pdf：fit-width 视口 tile + 翻页 + 预取 + z/Z + 水平平移；
   像素级平滑滚动；watch 重开；`--page`（图片动图顺延到 M3）
+- **M3a**（已完成）：Neovim 插件 `nvim/` + `--ipc` 双向滚动同步（Rex 分屏）
 - **M3**：PDF 文本层：搜索/高亮/链接/大纲/OSC52 选择
 - **M4**：纯文本降级打磨、bench、发布（cargo-brew / install.sh）

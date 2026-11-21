@@ -84,6 +84,10 @@ pub struct Item {
 #[derive(Clone, PartialEq, Debug)]
 pub struct Block {
     pub hash: u64,
+    /// Byte range of the block's source in the original document. Used to map
+    /// between editor lines and layout rows; empty when pulldown-cmark did not
+    /// report one.
+    pub src: Range<usize>,
     pub node: Node,
 }
 
@@ -178,8 +182,12 @@ impl<'a> Builder<'a> {
     fn push_node(&mut self, node: Node, range: Option<Range<usize>>) {
         if self.stack.len() == 1 {
             let range = self.top_range.take().or(range).unwrap_or(0..0);
-            let hash = xxh3_64(self.src[range].as_bytes());
-            self.blocks.push(Block { hash, node });
+            let hash = xxh3_64(self.src[range.clone()].as_bytes());
+            self.blocks.push(Block {
+                hash,
+                src: range,
+                node,
+            });
         } else {
             self.stack.last_mut().unwrap().1.push(node);
         }
@@ -569,5 +577,36 @@ mod tests {
         assert!(matches!(&d.blocks[0].node, Node::Image { url } if url == "shot.png"));
         let d = parse("see ![](shot.png) here\n");
         assert!(matches!(&d.blocks[0].node, Node::Para(_)));
+    }
+
+    #[test]
+    fn blocks_carry_source_ranges() {
+        let src = "# Title\n\nSome *text*.\n\n```rust\nfn main() {}\n```\n\n- a\n- b\n\n> quote\n\n| a | b |\n|---|---|\n| 1 | 2 |\n";
+        let d = parse(src);
+        assert_eq!(d.blocks.len(), 6);
+        for b in &d.blocks {
+            assert!(b.src.start < b.src.end, "empty range for {:?}", b.node);
+            assert!(b.src.end <= src.len());
+            assert_eq!(xxh3_64(src[b.src.clone()].as_bytes()), b.hash);
+        }
+        for pair in d.blocks.windows(2) {
+            assert!(
+                pair[0].src.end <= pair[1].src.start,
+                "overlapping ranges {:?} and {:?}",
+                pair[0].src,
+                pair[1].src
+            );
+        }
+        assert_eq!(src[d.blocks[0].src.clone()].trim_end(), "# Title");
+    }
+
+    #[test]
+    fn source_ranges_cover_nested_blocks() {
+        let src = "> - a\n> - b\n\n1. one\n2. two\n";
+        let d = parse(src);
+        assert_eq!(d.blocks.len(), 2);
+        assert!(src[d.blocks[0].src.clone()].contains("- a"));
+        assert!(src[d.blocks[1].src.clone()].contains("2. two"));
+        assert!(d.blocks[0].src.end <= d.blocks[1].src.start);
     }
 }

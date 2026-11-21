@@ -5,7 +5,7 @@ Preview PDFs, images and Markdown in terminals that speak the
 Built for macOS + [Rex](https://github.com/tfcace/rex), zero external
 dependencies (no Node, no browser, no poppler).
 
-Status: **M2** — images + Markdown (live preview) + PDF (paged, zoom, reload).
+Status: **M3a** — images + Markdown (live preview, Neovim scroll sync) + PDF (paged, zoom, reload).
 
 ```sh
 cargo build --release
@@ -17,6 +17,7 @@ docp --page 12 paper.pdf    # start on page 12
 docp --theme light notes.md # terminal (default) | dark | light
 docp --cat notes.md         # plain styled output, no alt screen
 docp --info                 # print detected capabilities and config
+docp --ipc /tmp/p.sock n.md # also serve editor scroll sync (Neovim plugin)
 ```
 
 Fonts and layout are configurable, by file or by flag (flags win):
@@ -79,6 +80,38 @@ and in the status bar.
 - **CJK aware.** Wrapping, table padding and alignment measure display width
   (`图片` is 4 columns, not 2 chars), with hanging punctuation so closing marks
   never start a line.
+
+## Neovim + Rex: synced preview
+
+Edit Markdown in Neovim with a live docp pane beside it; scrolling in either
+pane follows the other. The plugin lives in [`nvim/`](nvim/) and currently
+requires [Rex](https://github.com/tfcace/rex) (the pane is opened with
+`rex split`).
+
+```lua
+-- lazy.nvim, or add ~/workspace/kitty-doc-preview/nvim to 'runtimepath'
+{ dir = "~/workspace/kitty-doc-preview/nvim",
+  config = function() require("docp").setup({ docp_bin = "docp" }) end }
+```
+
+Then, in a Markdown buffer inside a Rex pane:
+
+```vim
+:DocpPreview   " open a preview pane for this buffer (reuses it next time)
+:DocpToggle    " open or close
+:DocpClose     " close the pane and the socket
+```
+
+`setup()` options: `docp_bin` (name on `PATH` or absolute), `docp_args`,
+`ratio` (share of the Rex split, default 50), `debounce` (ms, default 40),
+`takeover_ms` (how long preview-driven scrolls suppress editor echo, default
+120).
+
+Under the hood `docp --ipc <socket> file.md` serves newline-delimited JSON on a
+Unix socket: the editor sends the top visible line (`sync`), the preview
+answers with its top block's line (`top`). Rendering still reloads on save;
+sync is block-granular in v1 (see
+[ARCHITECTURE §5.4](docs/ARCHITECTURE.md#54-编辑器同步neovim--rex)).
 
 ## Architecture
 

@@ -3,9 +3,11 @@ mod cat;
 mod config;
 mod imgview;
 mod input;
+mod ipc;
 mod mdview;
 mod pagedview;
 mod screen;
+mod srcmap;
 
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
@@ -53,6 +55,9 @@ struct Cli {
     /// PDF page to start on (1-based)
     #[arg(long, value_name = "N")]
     page: Option<usize>,
+    /// Unix socket for editor scroll sync (Markdown only)
+    #[arg(long, value_name = "PATH")]
+    ipc: Option<PathBuf>,
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -109,7 +114,13 @@ fn main() -> Result<()> {
 
     let theme = resolve_theme(config.theme.name.as_deref(), &caps)?;
     let kind = caps::kind(&file);
+    if cli.ipc.is_some() && kind != caps::Kind::Markdown {
+        bail!("--ipc is only supported for Markdown previews");
+    }
     if cli.cat || !std::io::stdout().is_terminal() {
+        if cli.ipc.is_some() {
+            bail!("--ipc needs an interactive preview; drop --cat");
+        }
         return cat::run(&file, kind, &caps, &theme, config.layout.max_width);
     }
     if !caps.graphics {
@@ -118,7 +129,13 @@ fn main() -> Result<()> {
 
     match kind {
         caps::Kind::Image => imgview::run(&file, caps),
-        caps::Kind::Markdown => mdview::run(&file, caps, theme, config.layout.max_width),
+        caps::Kind::Markdown => mdview::run(
+            &file,
+            caps,
+            theme,
+            config.layout.max_width,
+            cli.ipc.as_deref(),
+        ),
         caps::Kind::Pdf => pagedview::run(&file, caps, theme, cli.page),
     }
 }

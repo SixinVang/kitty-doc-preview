@@ -4,6 +4,7 @@
 use crate::caps::Caps;
 use crate::input::Input;
 use crate::screen::{Frame, Screen};
+use crate::{ipc, srcmap};
 use crossbeam_channel::{select, unbounded, Receiver, Sender};
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEventKind};
 use docmodel::{Attrs, Cell, Line, Row, Theme};
@@ -20,6 +21,8 @@ use xxhash_rust::xxh3::{xxh3_64, Xxh3};
 const DEBOUNCE: Duration = Duration::from_millis(15);
 const SETTLE: Duration = Duration::from_millis(80);
 const MARK: Duration = Duration::from_millis(1500);
+/// Minimum gap between `top` messages sent to an attached editor.
+const EMIT_MIN: Duration = Duration::from_millis(33);
 
 const GUTTER: usize = 2;
 
@@ -103,10 +106,30 @@ pub struct App {
     latency: Option<Duration>,
     message: Option<String>,
 
+    /// Editor sync: byte↔line map of the last parse.
+    lines: srcmap::LineMap,
+    ipc: Option<ipc::Ipc>,
+    /// Keeps the channel open when no editor socket was requested.
+    ipc_idle: Option<Sender<ipc::Event>>,
+    /// The top row was set by the editor; do not echo it back.
+    ipc_scroll: bool,
+    /// The top changed locally and owes the editor a `top` message.
+    top_dirty: bool,
+    seen_top: usize,
+    emitted: Option<usize>,
+    emit_at: Option<Instant>,
+    last_emit: Option<Instant>,
+
     out: Vec<u8>,
 }
 
-pub fn run(path: &Path, mut caps: Caps, theme: Theme, max_width: usize) -> anyhow::Result<()> {
+pub fn run(
+    path: &Path,
+    mut caps: Caps,
+    theme: Theme,
+    max_width: usize,
+    ipc_path: Option<&Path>,
+) -> anyhow::Result<()> {
     crate::caps::settle(&mut caps);
     let path = std::fs::canonicalize(path)?;
     render_md::fonts::warm_system();
@@ -150,8 +173,32 @@ pub fn run(path: &Path, mut caps: Caps, theme: Theme, max_width: usize) -> anyho
         edit_started: Some(Instant::now()),
         latency: None,
         message: None,
+        lines: srcmap::LineMap::default(),
+        ipc: None,
+        ipc_idle: None,
+        ipc_scroll: false,
+        top_dirty: false,
+        seen_top: 0,
+        emitted: None,
+        emit_at: None,
+        last_emit: None,
         out: Vec::new(),
     };
+
+    let (ipc_rx, ipc_idle) = match ipc_path {
+        Some(sock) => {
+            let (server, rx) = ipc::Ipc::listen(sock)?;
+            app.ipc = Some(server);
+            (rx, None)
+        }
+        None => {
+            // Keep a sender alive so `select!` never observes a disconnected
+            // receiver and spins.
+            let (tx, rx) = unbounded();
+            (rx, Some(tx))
+        }
+    };
+    app.ipc_idle = ipc_idle;
 
     crate::screen::enter()?;
     let prev_hook = std::panic::take_hook();
@@ -185,7 +232,7 @@ pub fn run(path: &Path, mut caps: Caps, theme: Theme, max_width: usize) -> anyho
     )?;
 
     app.reload(&mut screen);
-    let result = app.event_loop(&mut screen, &input, fs_rx, pele_rx, done_rx);
+    let result = app.event_loop(&mut screen, &input, fs_rx, pele_rx, done_rx, ipc_rx);
     app.cleanup();
     crate::screen::leave();
     result
@@ -199,15 +246,21 @@ impl App {
         fs: Receiver<()>,
         pele: Receiver<pele::Response>,
         done: Receiver<Done>,
+        ipc_events: Receiver<ipc::Event>,
     ) -> anyhow::Result<()> {
         let events = input.events.clone();
         let mut reload_at: Option<Instant> = None;
         loop {
             let now = Instant::now();
-            let deadline = [reload_at, self.settle_until, self.next_mark_expiry()]
-                .into_iter()
-                .flatten()
-                .min();
+            let deadline = [
+                reload_at,
+                self.settle_until,
+                self.next_mark_expiry(),
+                self.emit_at,
+            ]
+            .into_iter()
+            .flatten()
+            .min();
             let timeout = deadline
                 .map(|d| d.saturating_duration_since(now))
                 .unwrap_or(Duration::from_secs(3600));
@@ -226,6 +279,9 @@ impl App {
                 },
                 recv(pele) -> r => if let Ok(r) = r { self.on_pele(r); relayout = true; },
                 recv(done) -> d => if let Ok(d) = d { relayout |= self.on_done(d); },
+                recv(ipc_events) -> m => if let Ok(m) = m {
+                    self.on_ipc(m, &mut repaint);
+                },
                 default(timeout) => {},
             }
             while let Ok(ev) = events.try_recv() {
@@ -241,11 +297,25 @@ impl App {
             while let Ok(d) = done.try_recv() {
                 relayout |= self.on_done(d);
             }
+            while let Ok(m) = ipc_events.try_recv() {
+                self.on_ipc(m, &mut repaint);
+            }
             if quit {
                 return Ok(());
             }
 
             let now = Instant::now();
+            // Any top change from local input is owed to the editor; changes
+            // the editor asked for (`ipc_scroll`) never bounce back.
+            if self.top != self.seen_top {
+                self.seen_top = self.top;
+                if !self.ipc_scroll {
+                    self.top_dirty = true;
+                }
+            }
+            if self.top_dirty || self.emit_at.is_some_and(|t| t <= now) {
+                self.flush_top();
+            }
             if reload_at.is_some_and(|t| t <= now) {
                 reload_at = None;
                 self.reload(screen);
@@ -309,6 +379,10 @@ impl App {
         relayout: &mut bool,
         repaint: &mut bool,
     ) -> bool {
+        // Local input takes over from the editor.
+        if matches!(ev, Event::Key(_) | Event::Mouse(_)) {
+            self.ipc_scroll = false;
+        }
         match ev {
             Event::Key(k) if k.kind != KeyEventKind::Release => self.key(k, repaint),
             Event::Mouse(m) => {
@@ -422,6 +496,7 @@ impl App {
         }
         let first = self.src_hash.is_none();
         self.src_hash = Some(hash);
+        self.lines = srcmap::LineMap::new(&src);
         let new = doc::parse(&src);
 
         let at_bottom = !first && (self.follow || (self.top > 0 && self.top >= self.max_top()));
@@ -455,6 +530,10 @@ impl App {
             self.top = self.max_top();
             self.follow = true;
         }
+        // Reloading must not push a `top` back at the editor: the save came
+        // from there, and it re-sends its line if it wants to re-anchor.
+        self.seen_top = self.top;
+        self.top_dirty = false;
         let _ = self.paint(screen);
     }
 
@@ -494,6 +573,7 @@ impl App {
         if follow {
             self.top = self.max_top();
         }
+        self.seen_top = self.top;
     }
 
     // ---- layout ----
@@ -893,6 +973,93 @@ impl App {
             Err(e) => self.message = Some(format!("render failed: {e}")),
         }
         true
+    }
+
+    // ---- editor sync ----
+
+    /// First source line (1-based) of the block at the top of the viewport.
+    fn top_line(&self) -> usize {
+        let block = self.block_at(self.top.min(self.layout.len().saturating_sub(1)));
+        srcmap::block_line(&self.doc.blocks, &self.lines, block)
+    }
+
+    fn on_ipc(&mut self, ev: ipc::Event, repaint: &mut bool) {
+        match ev {
+            ipc::Event::Connected => {
+                if let Some(ipc) = &self.ipc {
+                    ipc.send_ready();
+                }
+                // A new editor session has not agreed on a position yet.
+                self.emitted = None;
+                self.emit_at = None;
+            }
+            ipc::Event::Sync { line } => *repaint |= self.apply_sync(line),
+            ipc::Event::Close | ipc::Event::Disconnected => {
+                if matches!(ev, ipc::Event::Close) {
+                    if let Some(ipc) = &self.ipc {
+                        ipc.disconnect();
+                    }
+                }
+                self.emitted = None;
+                self.emit_at = None;
+            }
+        }
+        // The IPC message may have changed the top; do not treat it as local.
+        self.seen_top = self.top;
+    }
+
+    /// Jump to the block containing an editor line. Returns true on a change.
+    fn apply_sync(&mut self, line: usize) -> bool {
+        if self.doc.blocks.is_empty() {
+            return false;
+        }
+        let block = srcmap::line_block(
+            &self.doc.blocks,
+            &self.lines,
+            line.clamp(1, self.lines.line_count()),
+        );
+        let row = self
+            .starts
+            .get(block)
+            .copied()
+            .unwrap_or(0)
+            .min(self.max_top());
+        let changed = row != self.top;
+        self.top = row;
+        self.follow = false;
+        // The editor drove this scroll; never echo it back.
+        self.ipc_scroll = true;
+        self.top_dirty = false;
+        self.emit_at = None;
+        changed
+    }
+
+    /// Send the top block's source line, throttled and deduplicated.
+    fn flush_top(&mut self) {
+        self.emit_at = None;
+        if self.ipc.is_none() || self.ipc_scroll || !self.top_dirty {
+            return;
+        }
+        let line = self.top_line();
+        if self.emitted == Some(line) {
+            self.top_dirty = false;
+            return;
+        }
+        let now = Instant::now();
+        if let Some(last) = self.last_emit {
+            let elapsed = now.saturating_duration_since(last);
+            if elapsed < EMIT_MIN {
+                self.emit_at = Some(now + (EMIT_MIN - elapsed));
+                return;
+            }
+        }
+        let block = self.block_at(self.top.min(self.layout.len().saturating_sub(1)));
+        if let Some(ipc) = &self.ipc {
+            ipc.send_top(line, block + 1);
+        }
+        self.emitted = Some(line);
+        self.last_emit = Some(now);
+        self.top_dirty = false;
     }
 
     // ---- painting ----

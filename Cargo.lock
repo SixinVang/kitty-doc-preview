@@ -525,6 +525,7 @@ dependencies = [
  "render-md",
  "render-pdf",
  "serde",
+ "serde_json",
  "termui",
  "toml",
  "unicode-width",
