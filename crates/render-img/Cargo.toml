@@ -1,0 +1,11 @@
+[package]
+name = "render-img"
+description = "Image loading and cell-grid layout with vertical tiling"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow = { workspace = true }
+image = { workspace = true }
+kgp = { path = "../kgp" }

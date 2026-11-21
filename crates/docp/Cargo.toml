@@ -1,0 +1,20 @@
+[package]
+name = "docp"
+description = "Preview PDFs, images and Markdown in kitty-graphics terminals (Rex)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "docp"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+clap = { workspace = true }
+crossterm = { workspace = true }
+image = { workspace = true }
+docmodel = { path = "../docmodel" }
+kgp = { path = "../kgp" }
+render-img = { path = "../render-img" }
+termui = { path = "../termui" }

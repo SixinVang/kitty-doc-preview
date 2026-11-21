@@ -1,0 +1,9 @@
+[package]
+name = "kgp"
+description = "Kitty graphics protocol: probing, transmission, Unicode placeholders"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+base64 = { workspace = true }

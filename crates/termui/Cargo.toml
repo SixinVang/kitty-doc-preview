@@ -1,0 +1,9 @@
+[package]
+name = "termui"
+description = "Terminal primitives: /dev/tty, winsize ioctl, raw mode, timed queries"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+libc = { workspace = true }

@@ -1,0 +1,6 @@
+[package]
+name = "docmodel"
+description = "Shared display model: styled text lines and image placeholder rows"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
