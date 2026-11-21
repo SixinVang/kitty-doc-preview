@@ -9,6 +9,8 @@ Source: <https://github.com/SixinVang/kitty-doc-preview>
 
 Status: **M3a** — images + Markdown (live preview, Neovim scroll sync) + PDF (paged, zoom, reload).
 
+![Neovim on the left, docp previewing the same Markdown on the right](docs/nvim-with-docp.png)
+
 ## Install
 
 docp is not on crates.io yet; install it from the GitHub repository. A Rust
