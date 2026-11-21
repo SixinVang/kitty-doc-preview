@@ -23,8 +23,8 @@ fn pele_var(theme: &Theme, name: &str) -> Option<String> {
         "--pele-border" => mix(theme.fg, theme.bg, 0.55),
         "--pele-accent" => theme.accent(),
         "--pele-critical" => theme.red(),
-        "--pele-font" => return Some(format!("{},sans-serif", fonts::SANS)),
-        "--pele-font-mono" => return Some(format!("{},monospace", fonts::MONO_FAMILY)),
+        "--pele-font" => return Some(format!("{},sans-serif", fonts::sans_family())),
+        "--pele-font-mono" => return Some(format!("{},monospace", fonts::mono_family())),
         _ => {
             let n: usize = name.strip_prefix("--pele-series-")?.parse().ok()?;
             const SERIES: [usize; 8] = [12, 11, 10, 9, 14, 13, 3, 6];

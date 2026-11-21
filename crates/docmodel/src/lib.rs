@@ -96,8 +96,10 @@ pub struct Line {
 }
 
 impl Line {
+    /// Display width in terminal columns (CJK aware). This is what padding and
+    /// alignment must use: `图片` is two chars but four columns.
     pub fn width(&self) -> usize {
-        self.cells.iter().map(|c| c.text.chars().count()).sum()
+        self.cells.iter().map(|c| display_width(&c.text)).sum()
     }
 
     /// `rest` with `prefix` cells prepended (quote bars, list markers).
@@ -108,12 +110,6 @@ impl Line {
             cells,
             fill: rest.fill,
         }
-    }
-
-    /// Styled width in terminal columns (CJK aware).
-    pub fn cols(&self) -> usize {
-        use unicode_width::UnicodeWidthStr;
-        self.cells.iter().map(|c| c.text.as_str().width()).sum()
     }
 
     /// Encode into `s`: SGR per cell, OSC 8 around url runs, `fill` pads to
@@ -132,7 +128,7 @@ impl Line {
             s.push_str("\x1b]8;;\x1b\\");
         }
         if let Some(bg) = self.fill {
-            let pad = width.saturating_sub(self.cols());
+            let pad = width.saturating_sub(self.width());
             sgr(
                 s,
                 &Attrs {
@@ -177,6 +173,18 @@ pub fn char_cols(ch: char) -> usize {
     ch.width().unwrap_or(0)
 }
 
+/// Terminal column width of a string.
+///
+/// Zero-width joiners and the emoji variation selector carry no advance of
+/// their own; counting them would shift every cell after them.
+pub fn display_width(s: &str) -> usize {
+    use unicode_width::UnicodeWidthChar;
+    s.chars()
+        .filter(|c| !matches!(*c, '\u{FE0E}' | '\u{FE0F}' | '\u{200D}'))
+        .map(|c| c.width().unwrap_or(0))
+        .sum()
+}
+
 /// Append one SGR sequence for `a` (resets first, so cells are independent).
 pub fn sgr(s: &mut String, a: &Attrs) {
     s.push_str("\x1b[0");
@@ -204,6 +212,18 @@ pub fn sgr(s: &mut String, a: &Attrs) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn width_is_display_width_not_char_count() {
+        let line = Line {
+            cells: vec![Cell::new("图片", Attrs::default())],
+            fill: None,
+        };
+        assert_eq!(line.width(), 4);
+        assert_eq!(display_width("✅"), 2);
+        assert_eq!(display_width("\u{2705}\u{FE0F}"), 2); // emoji + VS16
+        assert_eq!(display_width("a中"), 3);
+    }
 
     #[test]
     fn renders_styles_and_truncates() {

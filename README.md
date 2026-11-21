@@ -14,7 +14,31 @@ docp image.png              # image viewer
 docp notes.md               # markdown, re-renders on save
 docp --theme light notes.md # terminal (default) | dark | light
 docp --cat notes.md         # plain styled output, no alt screen
-docp --info                 # print detected capabilities
+docp --info                 # print detected capabilities and config
+```
+
+Fonts and layout are configurable, by file or by flag (flags win):
+
+```sh
+docp --font-sans "Atkinson Hyperlegible" notes.md
+docp --font-sans-file ~/Library/Fonts/MySans.ttf notes.md
+docp --max-width 90 notes.md
+docp --config ./docp.toml notes.md
+```
+
+```toml
+# ~/.config/docp/config.toml   (see docp.example.toml)
+[theme]
+name = "terminal"            # terminal | dark | light
+
+[fonts]
+sans = "Inter"               # headings / pixel text
+mono = "JetBrains Mono"      # diagram labels
+sans_file = ""               # optional files win over the families
+mono_file = ""
+
+[layout]
+max_width = 110              # text column clamp, in cells
 ```
 
 Keys: `j/k` scroll · `space/b` page · `d/u` half page · `g/G` top/bottom
@@ -35,7 +59,9 @@ Keys: `j/k` scroll · `space/b` page · `d/u` half page · `g/G` top/bottom
 - **Colors from your terminal.** The `terminal` theme asks Rex for its
   foreground, background and 16-color palette at startup; `dark`/`light` are
   built-in overrides.
-- **CJK aware.** Wrapping and table layout measure display width, not chars.
+- **CJK aware.** Wrapping, table padding and alignment measure display width
+  (`图片` is 4 columns, not 2 chars), with hanging punctuation so closing marks
+  never start a line.
 
 ## Architecture
 

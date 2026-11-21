@@ -134,7 +134,7 @@ pub fn heading(h: &Heading, color: Rgb, cell: Cell) -> Result<Raster, String> {
         svg.push_str(&format!(
             r#"<text x="0" y="{:.1}" font-family="{}" font-weight="{}" font-size="{:.1}" fill="{}">{}</text>"#,
             baseline + i as f32 * line_px,
-            fonts::DISPLAY,
+            fonts::display_family(),
             weight,
             fs,
             color.hex(),
@@ -162,7 +162,7 @@ fn draw(
 ) -> Result<Raster, String> {
     let opts = usvg::Options {
         fontdb,
-        font_family: fonts::SANS.into(),
+        font_family: fonts::sans_family().into(),
         ..Default::default()
     };
     let tree = usvg::Tree::from_str(svg, &opts).map_err(|e| e.to_string())?;

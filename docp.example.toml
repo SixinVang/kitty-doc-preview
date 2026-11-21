@@ -1,0 +1,32 @@
+# docp configuration
+#
+# Location (first one that exists is used):
+#   $DOCP_CONFIG
+#   $XDG_CONFIG_HOME/docp/config.toml
+#   ~/.config/docp/config.toml
+# Or pass --config PATH. Unknown keys are an error, so typos are loud.
+
+[theme]
+# terminal: follow the terminal's own colors (queries it at startup)
+# dark, light: built-in palettes
+name = "terminal"
+
+[fonts]
+# Families used for pixel content (big-type headings, Mermaid labels).
+# These must be visible to the rasterizer: embedded fonts (Inter,
+# JetBrains Mono) or any font installed on the system.
+sans = "Inter"
+mono = "JetBrains Mono"
+
+# Optional font files. When set they win over the family names above and are
+# also used for measurement, so heading wrapping matches what is drawn.
+# Example:
+#   sans_file = "/Users/me/Library/Fonts/AtkinsonHyperlegible-Regular.ttf"
+#   mono_file = "/Users/me/Library/Fonts/Iosevka-Regular.ttf"
+sans_file = ""
+mono_file = ""
+
+[layout]
+# Clamp for the text column, in terminal cells. Wide terminals get margins
+# instead of 200-character lines.
+max_width = 110

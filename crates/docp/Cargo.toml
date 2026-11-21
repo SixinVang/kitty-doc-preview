@@ -17,6 +17,8 @@ crossterm = { workspace = true }
 image = { workspace = true }
 notify = { workspace = true }
 rayon = { workspace = true }
+serde = { workspace = true }
+toml = { workspace = true }
 unicode-width = { workspace = true }
 xxhash-rust = { workspace = true }
 

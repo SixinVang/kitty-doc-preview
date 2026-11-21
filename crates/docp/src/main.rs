@@ -1,11 +1,13 @@
 mod caps;
 mod cat;
+mod config;
 mod imgview;
 mod mdview;
 mod screen;
 
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
+use config::{CliOverrides, Config};
 use docmodel::Theme;
 use std::io::IsTerminal;
 use std::path::PathBuf;
@@ -19,10 +21,28 @@ use std::path::PathBuf;
 struct Cli {
     /// File to preview
     file: Option<PathBuf>,
-    /// Color theme
-    #[arg(long, value_enum, env = "DOCP_THEME", default_value_t = ThemeChoice::Terminal)]
-    theme: ThemeChoice,
-    /// Print detected terminal capabilities and exit
+    /// Config file (default: ~/.config/docp/config.toml)
+    #[arg(long, value_name = "PATH")]
+    config: Option<PathBuf>,
+    /// Color theme: terminal, dark or light
+    #[arg(long, value_name = "NAME")]
+    theme: Option<String>,
+    /// Family for headings and pixel text
+    #[arg(long, value_name = "FAMILY")]
+    font_sans: Option<String>,
+    /// Family for code and diagram labels
+    #[arg(long, value_name = "FAMILY")]
+    font_mono: Option<String>,
+    /// Font file to use for sans text
+    #[arg(long, value_name = "PATH")]
+    font_sans_file: Option<String>,
+    /// Font file to use for monospace text
+    #[arg(long, value_name = "PATH")]
+    font_mono_file: Option<String>,
+    /// Text column width clamp, in cells
+    #[arg(long, value_name = "CELLS")]
+    max_width: Option<usize>,
+    /// Print detected capabilities and the effective config, then exit
     #[arg(short, long)]
     info: bool,
     /// Render to stdout instead of the alternate screen (no interactivity)
@@ -34,7 +54,6 @@ struct Cli {
 
 #[derive(Copy, Clone, PartialEq, Eq, ValueEnum)]
 enum ThemeChoice {
-    /// Use the terminal's own colors (queried at startup)
     Terminal,
     Dark,
     Light,
@@ -57,9 +76,22 @@ fn main() -> Result<()> {
         return gen_test(&path, tall);
     }
 
+    let mut config = Config::load(cli.config.as_deref())?;
+    config.apply_cli(&CliOverrides {
+        theme: cli.theme.clone(),
+        font_sans: cli.font_sans.clone(),
+        font_mono: cli.font_mono.clone(),
+        font_sans_file: cli.font_sans_file.clone(),
+        font_mono_file: cli.font_mono_file.clone(),
+        max_width: cli.max_width,
+    });
+    // Fonts must be configured before the first render loads them.
+    render_md::fonts::configure(config.font_spec());
+
     let caps = caps::detect(300).context("probing terminal capabilities")?;
     if cli.info {
         println!("{caps:#?}");
+        println!("{config:#?}");
         return Ok(());
     }
 
@@ -70,15 +102,10 @@ fn main() -> Result<()> {
         bail!("no such file: {}", file.display());
     }
 
-    let theme = match cli.theme {
-        ThemeChoice::Terminal => caps.terminal_theme.clone(),
-        ThemeChoice::Dark => Theme::dark_default(),
-        ThemeChoice::Light => Theme::light_default(),
-    };
-
+    let theme = resolve_theme(config.theme.name.as_deref(), &caps)?;
     let kind = caps::kind(&file);
     if cli.cat || !std::io::stdout().is_terminal() {
-        return cat::run(&file, kind, &caps, &theme);
+        return cat::run(&file, kind, &caps, &theme, config.layout.max_width);
     }
     if !caps.graphics {
         bail!("terminal does not support the kitty graphics protocol");
@@ -86,8 +113,17 @@ fn main() -> Result<()> {
 
     match kind {
         caps::Kind::Image => imgview::run(&file, caps),
-        caps::Kind::Markdown => mdview::run(&file, caps, theme),
+        caps::Kind::Markdown => mdview::run(&file, caps, theme, config.layout.max_width),
         caps::Kind::Pdf => bail!("PDF support lands in M2; not wired yet"),
+    }
+}
+
+fn resolve_theme(name: Option<&str>, caps: &caps::Caps) -> Result<Theme> {
+    match name.unwrap_or("terminal") {
+        "terminal" => Ok(caps.terminal_theme.clone()),
+        "dark" => Ok(Theme::dark_default()),
+        "light" => Ok(Theme::light_default()),
+        other => bail!("unknown theme {other:?}; expected terminal, dark or light"),
     }
 }
 
@@ -126,3 +162,6 @@ fn gen_test(path: &std::path::Path, tall: bool) -> Result<()> {
     println!("wrote {} ({w}x{h})", path.display());
     Ok(())
 }
+
+#[allow(dead_code)]
+fn _theme_choice(_c: ThemeChoice) {}

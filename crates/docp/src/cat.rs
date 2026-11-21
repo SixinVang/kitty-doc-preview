@@ -10,22 +10,24 @@ use std::path::Path;
 
 const DEFAULT_COLS: usize = 80;
 
-pub fn run(file: &Path, kind: Kind, caps: &Caps, theme: &Theme) -> Result<()> {
+pub fn run(file: &Path, kind: Kind, caps: &Caps, theme: &Theme, max_width: usize) -> Result<()> {
     match kind {
-        Kind::Markdown => markdown(file, caps, theme),
+        Kind::Markdown => markdown(file, caps, theme, max_width),
         Kind::Image => image(file, caps),
         Kind::Pdf => anyhow::bail!("pdf in cat mode lands in M2"),
     }
 }
 
-fn markdown(file: &Path, caps: &Caps, theme: &Theme) -> Result<()> {
+fn markdown(file: &Path, caps: &Caps, theme: &Theme, max_width: usize) -> Result<()> {
     let src = std::fs::read_to_string(file)?;
     let d = doc::parse(&src);
-    let width = if std::io::stdout().is_terminal() {
-        (caps.cols as usize).clamp(20, 120)
+    // Honour the configured clamp whether or not stdout is a terminal.
+    let avail = if std::io::stdout().is_terminal() {
+        caps.cols as usize
     } else {
         DEFAULT_COLS
     };
+    let width = avail.clamp(20, max_width.max(20));
     let ctx = text::Ctx { theme };
     let mut out = String::new();
     for (i, block) in d.blocks.iter().enumerate() {

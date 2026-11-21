@@ -2,7 +2,7 @@
 
 use crate::doc::{Alert, Align, Item, Node, Span, Style};
 use crate::highlight;
-use docmodel::{Attrs, Cell, Line, Theme};
+use docmodel::{display_width, Attrs, Cell, Line, Theme};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 pub struct Ctx<'a> {
@@ -191,7 +191,7 @@ impl Ctx<'_> {
                 (Some(s), None) => format!("{:>w$}. ", s + i as u64, w = marker_w - 2),
                 (None, None) => "• ".to_string(),
             };
-            let marker_w = marker_w.max(marker.width());
+            let marker_w = marker_w.max(display_width(&marker));
             let attrs = Attrs {
                 fg: Some(if item.task == Some(true) {
                     t.green()
@@ -275,7 +275,7 @@ impl Ctx<'_> {
         if ncols == 0 {
             return Vec::new();
         }
-        let cell_w = |c: &Vec<Span>| c.iter().map(|s| s.text.width()).sum::<usize>();
+        let cell_w = |c: &Vec<Span>| c.iter().map(|s| display_width(&s.text)).sum::<usize>();
         let mut want: Vec<usize> = (0..ncols)
             .map(|i| {
                 let h = head.get(i).map(cell_w).unwrap_or(0);
@@ -650,6 +650,41 @@ mod tests {
     fn tasks_and_quotes() {
         let out = render("- [x] shipped\n- [ ] next\n\n> quoted\n", 40);
         assert_eq!(out, vec!["☑ shipped", "☐ next", "", "▎ quoted"]);
+    }
+
+    #[test]
+    fn table_columns_align_with_cjk_and_emoji() {
+        let theme = Theme::dark_default();
+        let ctx = Ctx { theme: &theme };
+        let md = "| 格式 | 引擎 | 可搜索 |\n|---|---|---|\n| Markdown | pulldown-cmark | ✅ |\n| PDF | mupdf | ⏳ |\n| 图片 | image + resvg | ❌ |\n";
+        let d = doc::parse(md);
+        let lines = ctx.node(&d.blocks[0].node, 60);
+        // Every row must occupy the same number of columns, otherwise the
+        // terminal draws the right edge ragged.
+        let widths: Vec<usize> = lines.iter().map(|l| l.width()).collect();
+        assert!(
+            widths.windows(2).all(|w| w[0] == w[1]),
+            "ragged table: {widths:?} in {lines:#?}"
+        );
+        // Column starts must line up, which is the real complaint.
+        let pipe_col = |l: &Line| -> Option<usize> {
+            let mut col = 0;
+            for c in &l.cells {
+                for ch in c.text.chars() {
+                    if ch == '│' {
+                        return Some(col);
+                    }
+                    col += docmodel::char_cols(ch);
+                }
+            }
+            None
+        };
+        let starts: Vec<usize> = lines.iter().filter_map(pipe_col).collect();
+        assert!(starts.len() >= 4, "expected data rows: {lines:#?}");
+        assert!(
+            starts.windows(2).all(|w| w[0] == w[1]),
+            "column drift: {starts:?}"
+        );
     }
 
     #[test]

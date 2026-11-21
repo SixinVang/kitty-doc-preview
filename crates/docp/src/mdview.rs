@@ -19,7 +19,7 @@ use xxhash_rust::xxh3::{xxh3_64, Xxh3};
 const DEBOUNCE: Duration = Duration::from_millis(15);
 const SETTLE: Duration = Duration::from_millis(80);
 const MARK: Duration = Duration::from_millis(1500);
-const MAX_WIDTH: usize = 110;
+
 const GUTTER: usize = 2;
 
 struct Flat {
@@ -75,6 +75,7 @@ pub struct App {
     cell: PixelCell,
     cols: u16,
     rows: u16,
+    max_width: usize,
 
     top: usize,
     follow: bool,
@@ -101,7 +102,7 @@ pub struct App {
     out: Vec<u8>,
 }
 
-pub fn run(path: &Path, caps: Caps, theme: Theme) -> anyhow::Result<()> {
+pub fn run(path: &Path, caps: Caps, theme: Theme, max_width: usize) -> anyhow::Result<()> {
     let path = std::fs::canonicalize(path)?;
     render_md::fonts::warm_system();
     let (pele_tx, pele_rx) = unbounded();
@@ -123,6 +124,7 @@ pub fn run(path: &Path, caps: Caps, theme: Theme) -> anyhow::Result<()> {
         cell: PixelCell { w: cw, h: ch },
         cols: caps.cols,
         rows: caps.rows,
+        max_width: max_width.clamp(20, 400),
         top: 0,
         follow: false,
         layout: Vec::new(),
@@ -276,7 +278,7 @@ impl App {
     fn content_width(&self) -> usize {
         (self.cols as usize)
             .saturating_sub(GUTTER + 2)
-            .clamp(10, MAX_WIDTH)
+            .clamp(10, self.max_width)
     }
 
     fn view_height(&self) -> usize {

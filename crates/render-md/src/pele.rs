@@ -119,16 +119,21 @@ impl Engine {
             ctx.globals().set("__docpMeasure", measure)?;
             ctx.eval::<(), _>(BUNDLE)?;
             ctx.eval::<(), _>(
-                "globalThis.__docpRender = (src, maxWidth) => {\n\
-                   const r = peleRender(src, {\n\
+                format!(
+                    "globalThis.__docpRender = (src, maxWidth) => {{\n\
+                   const r = peleRender(src, {{\n\
                      maxWidth, responsive: false, fontSize: 16,\n\
                      autoDirection: true, directionBreakpoint: maxWidth + 1,\n\
-                     fontFamily: 'Inter', fontFamilyMono: 'JetBrains Mono',\n\
+                     fontFamily: {sans:?}, fontFamilyMono: {mono:?},\n\
                      links: false, images: false,\n\
-                     measurer: { width: (t, s, st) => __docpMeasure(t, s, st) },\n\
-                   });\n\
-                   return { svg: r.svg, width: r.width, height: r.height };\n\
-                 };",
+                     measurer: {{ width: (t, s, st) => __docpMeasure(t, s, st) }},\n\
+                   }});\n\
+                   return {{ svg: r.svg, width: r.width, height: r.height }};\n\
+                 }};",
+                    sans = fonts::sans_family(),
+                    mono = fonts::mono_family(),
+                )
+                .as_str(),
             )?;
             Ok(())
         })

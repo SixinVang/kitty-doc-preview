@@ -1,11 +1,12 @@
-//! Embedded fonts, text measurement and the font database resvg draws with.
+//! Fonts for pixel rendering: embedded defaults (Inter, JetBrains Mono),
+//! optionally replaced by user files or family names from the config.
 //!
-//! Inter and JetBrains Mono are compiled in so the Mac and the NAS render
-//! identically. Measurement reads advance widths straight from the font
-//! tables, which keeps Pele's layout and our heading wrapping in agreement
-//! with what resvg later draws.
+//! Measurement reads advance widths straight from the font tables so layout
+//! agrees with what resvg later draws. Configuration must happen before the
+//! first use; the CLI calls `configure` right after parsing arguments.
 
 use resvg::usvg::fontdb;
+use std::path::Path;
 use std::sync::{Arc, LazyLock, OnceLock};
 use ttf_parser::Face;
 
@@ -15,25 +16,120 @@ static DISPLAY_BOLD: &[u8] = include_bytes!("../assets/fonts/InterDisplay-Bold.t
 static DISPLAY_SEMIBOLD: &[u8] = include_bytes!("../assets/fonts/InterDisplay-SemiBold.ttf");
 static MONO: &[u8] = include_bytes!("../assets/fonts/JetBrainsMono-Regular.ttf");
 
-pub const SANS: &str = "Inter";
-pub const DISPLAY: &str = "Inter Display";
-pub const MONO_FAMILY: &str = "JetBrains Mono";
+pub const DEFAULT_SANS: &str = "Inter";
+pub const DEFAULT_DISPLAY: &str = "Inter Display";
+pub const DEFAULT_MONO: &str = "JetBrains Mono";
 
-struct Faces {
+/// User font configuration (from `[fonts]` in the config file).
+#[derive(Clone, Debug, Default)]
+pub struct FontSpec {
+    /// Family for body/heading pixel text.
+    pub sans: Option<String>,
+    /// Family for monospace pixel text (code, diagram labels).
+    pub mono: Option<String>,
+    /// Font file backing `sans`; also used for measurement.
+    pub sans_file: Option<String>,
+    /// Font file backing `mono`.
+    pub mono_file: Option<String>,
+}
+
+static SPEC: OnceLock<FontSpec> = OnceLock::new();
+
+/// Set the font configuration. Call once, before any rendering.
+pub fn configure(spec: FontSpec) {
+    let _ = SPEC.set(spec);
+}
+
+fn spec() -> &'static FontSpec {
+    SPEC.get_or_init(FontSpec::default)
+}
+
+struct Loaded {
+    bytes: &'static [u8],
+    face: Face<'static>,
+}
+
+fn load_file(path: &str) -> Option<Loaded> {
+    let bytes = std::fs::read(Path::new(path)).ok()?;
+    let leaked: &'static [u8] = Box::leak(bytes.into_boxed_slice());
+    let face = Face::parse(leaked, 0).ok()?;
+    Some(Loaded {
+        bytes: leaked,
+        face,
+    })
+}
+
+/// Family name declared inside a font file.
+fn family_of(face: &Face<'_>) -> Option<String> {
+    face.names()
+        .into_iter()
+        .find(|n| n.name_id == ttf_parser::name_id::FAMILY && n.is_unicode())
+        .and_then(|n| n.to_string())
+}
+
+struct Text {
+    user_sans: Option<Loaded>,
+    user_mono: Option<Loaded>,
     regular: Face<'static>,
     semibold: Face<'static>,
     display_bold: Face<'static>,
     display_semibold: Face<'static>,
     mono: Face<'static>,
+    sans_family: String,
+    mono_family: String,
+    display_family: String,
 }
 
-static FACES: LazyLock<Faces> = LazyLock::new(|| Faces {
-    regular: Face::parse(INTER, 0).expect("Inter"),
-    semibold: Face::parse(INTER_SEMIBOLD, 0).expect("Inter SemiBold"),
-    display_bold: Face::parse(DISPLAY_BOLD, 0).expect("Inter Display Bold"),
-    display_semibold: Face::parse(DISPLAY_SEMIBOLD, 0).expect("Inter Display SemiBold"),
-    mono: Face::parse(MONO, 0).expect("JetBrains Mono"),
+static TEXT: LazyLock<Text> = LazyLock::new(|| {
+    let s = spec();
+    let user_sans = s.sans_file.as_deref().and_then(load_file);
+    let user_mono = s.mono_file.as_deref().and_then(load_file);
+
+    let sans_family = user_sans
+        .as_ref()
+        .and_then(|l| family_of(&l.face))
+        .or_else(|| s.sans.clone())
+        .unwrap_or_else(|| DEFAULT_SANS.to_string());
+    let mono_family = user_mono
+        .as_ref()
+        .and_then(|l| family_of(&l.face))
+        .or_else(|| s.mono.clone())
+        .unwrap_or_else(|| DEFAULT_MONO.to_string());
+    // Headings keep the display face unless the user chose their own sans.
+    let display_family = if s.sans_file.is_some() || s.sans.is_some() {
+        sans_family.clone()
+    } else {
+        DEFAULT_DISPLAY.to_string()
+    };
+
+    Text {
+        user_sans,
+        user_mono,
+        regular: Face::parse(INTER, 0).expect("Inter"),
+        semibold: Face::parse(INTER_SEMIBOLD, 0).expect("Inter SemiBold"),
+        display_bold: Face::parse(DISPLAY_BOLD, 0).expect("Inter Display Bold"),
+        display_semibold: Face::parse(DISPLAY_SEMIBOLD, 0).expect("Inter Display SemiBold"),
+        mono: Face::parse(MONO, 0).expect("JetBrains Mono"),
+        sans_family,
+        mono_family,
+        display_family,
+    }
 });
+
+/// Family name for body/heading pixel text.
+pub fn sans_family() -> &'static str {
+    &TEXT.sans_family
+}
+
+/// Family name for monospace pixel text.
+pub fn mono_family() -> &'static str {
+    &TEXT.mono_family
+}
+
+/// Family name for big-type headings.
+pub fn display_family() -> &'static str {
+    &TEXT.display_family
+}
 
 /// Which face to measure with.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -46,13 +142,17 @@ pub enum Weight {
 }
 
 fn face(w: Weight) -> &'static Face<'static> {
-    let f = &*FACES;
+    let t = &*TEXT;
+    let user = |u: &'static Option<Loaded>, embedded: &'static Face<'static>| match u {
+        Some(l) => &l.face,
+        None => embedded,
+    };
     match w {
-        Weight::Regular => &f.regular,
-        Weight::SemiBold => &f.semibold,
-        Weight::DisplayBold => &f.display_bold,
-        Weight::DisplaySemiBold => &f.display_semibold,
-        Weight::Mono => &f.mono,
+        Weight::Mono => user(&t.user_mono, &t.mono),
+        Weight::Regular => user(&t.user_sans, &t.regular),
+        Weight::SemiBold => user(&t.user_sans, &t.semibold),
+        Weight::DisplayBold => user(&t.user_sans, &t.display_bold),
+        Weight::DisplaySemiBold => user(&t.user_sans, &t.display_semibold),
     }
 }
 
@@ -69,13 +169,13 @@ pub fn measure(text: &str, size: f32, style: i32) -> f32 {
 }
 
 pub fn width(text: &str, size: f32, w: Weight) -> f32 {
-    let face = face(w);
-    let scale = size / face.units_per_em() as f32;
+    let f = face(w);
+    let scale = size / f.units_per_em() as f32;
     let mut total = 0.0;
     for ch in text.chars() {
-        total += match face.glyph_index(ch).and_then(|g| face.glyph_hor_advance(g)) {
+        total += match f.glyph_index(ch).and_then(|g| f.glyph_hor_advance(g)) {
             Some(adv) => adv as f32 * scale,
-            // Glyphs the embedded fonts lack come from a system font. CJK and
+            // Glyphs the measured font lacks come from a system font. CJK and
             // other wide characters occupy a full em, not the ~0.6 em of a
             // Latin letter; getting this wrong makes diagrams and heading
             // wrapping overlap.
@@ -92,11 +192,10 @@ fn is_wide(ch: char) -> bool {
     ch.width() == Some(2)
 }
 
-/// True when every non-space character exists in the embedded sans fonts.
+/// True when every non-space character exists in the embedded sans face.
 pub fn covers(text: &str) -> bool {
-    let face = &FACES.regular;
     text.chars()
-        .all(|c| c.is_whitespace() || face.glyph_index(c).is_some())
+        .all(|c| c.is_whitespace() || TEXT.regular.glyph_index(c).is_some())
 }
 
 pub struct Metrics {
@@ -105,10 +204,10 @@ pub struct Metrics {
 
 /// Font metrics in em units (multiply by the font size).
 pub fn metrics(w: Weight) -> Metrics {
-    let face = face(w);
-    let upem = face.units_per_em() as f32;
+    let f = face(w);
+    let upem = f.units_per_em() as f32;
     Metrics {
-        cap_height: face.capital_height().unwrap_or(face.ascender() * 7 / 10) as f32 / upem,
+        cap_height: f.capital_height().unwrap_or(f.ascender() * 7 / 10) as f32 / upem,
     }
 }
 
@@ -117,28 +216,39 @@ fn embedded_db() -> fontdb::Database {
     for data in [INTER, INTER_SEMIBOLD, DISPLAY_BOLD, DISPLAY_SEMIBOLD, MONO] {
         db.load_font_source(fontdb::Source::Binary(Arc::new(data)));
     }
-    db.set_sans_serif_family(SANS);
-    db.set_serif_family(SANS);
-    db.set_monospace_family(MONO_FAMILY);
+    let t = &*TEXT;
+    db.set_sans_serif_family(t.sans_family.clone());
+    db.set_serif_family(t.sans_family.clone());
+    db.set_monospace_family(t.mono_family.clone());
+    if let Some(l) = &t.user_sans {
+        db.load_font_source(fontdb::Source::Binary(Arc::new(l.bytes)));
+    }
+    if let Some(l) = &t.user_mono {
+        db.load_font_source(fontdb::Source::Binary(Arc::new(l.bytes)));
+    }
     db
 }
 
 static EMBEDDED: LazyLock<Arc<fontdb::Database>> = LazyLock::new(|| Arc::new(embedded_db()));
 static WITH_SYSTEM: OnceLock<Arc<fontdb::Database>> = OnceLock::new();
 
-/// The fast database: only the embedded fonts.
+/// The fast database: only the embedded and configured fonts.
 pub fn embedded() -> Arc<fontdb::Database> {
     EMBEDDED.clone()
 }
 
-/// Embedded fonts plus the system's, for text the embedded fonts can't draw
-/// (Hebrew, CJK, emoji). Loading system fonts takes tens of milliseconds, so
+/// Embedded fonts plus the system's, for text the embedded fonts cannot draw
+/// (CJK, Hebrew, emoji). Loading system fonts takes tens of milliseconds, so
 /// `warm_system` starts it in the background at startup.
 pub fn with_system() -> Arc<fontdb::Database> {
     WITH_SYSTEM
         .get_or_init(|| {
             let mut db = embedded_db();
             db.load_system_fonts();
+            // A family requested by name (no file) has to come from the system.
+            let t = &*TEXT;
+            db.set_sans_serif_family(t.sans_family.clone());
+            db.set_monospace_family(t.mono_family.clone());
             Arc::new(db)
         })
         .clone()
@@ -177,8 +287,6 @@ mod tests {
 
     #[test]
     fn wide_glyphs_measure_one_em() {
-        // CJK glyphs are double-width; measuring them as Latin would make
-        // Mermaid labels overlap and headings wrap wrong.
         let one = width("中", 16.0, Weight::Regular);
         assert!((one - 16.0).abs() < 0.5, "{one}");
         let three = width("中文字", 16.0, Weight::Regular);
@@ -190,5 +298,12 @@ mod tests {
         let latin = width("iii", 16.0, Weight::Regular);
         let cjk = width("中", 16.0, Weight::Regular);
         assert!(latin < cjk);
+    }
+
+    #[test]
+    fn default_families() {
+        assert_eq!(sans_family(), DEFAULT_SANS);
+        assert_eq!(mono_family(), DEFAULT_MONO);
+        assert_eq!(display_family(), DEFAULT_DISPLAY);
     }
 }
