@@ -9,11 +9,49 @@ Source: <https://github.com/SixinVang/kitty-doc-preview>
 
 Status: **M3a** — images + Markdown (live preview, Neovim scroll sync) + PDF (paged, zoom, reload).
 
+## Install
+
+docp is not on crates.io yet; install it from the GitHub repository. A Rust
+toolchain (`rustup`) and the platform C toolchain (make + a C compiler) are
+needed because the PDF backend compiles MuPDF — macOS: `xcode-select --install`,
+Linux: `build-essential`.
+
+**With Cargo (simplest, easy to update):**
+
+```sh
+cargo install --git https://github.com/SixinVang/kitty-doc-preview docp
+```
+
+This puts the binary in `~/.cargo/bin` (keep that on your `PATH`). Update to the
+latest `main` at any time with the same command plus `--force`:
+
+```sh
+cargo install --git https://github.com/SixinVang/kitty-doc-preview docp --force
+```
+
+Check the installed version and uninstall:
+
+```sh
+cargo install --list          # shows docp's version
+docp --version
+cargo uninstall docp
+```
+
+**From a clone (for development):**
+
 ```sh
 git clone https://github.com/SixinVang/kitty-doc-preview
 cd kitty-doc-preview
 cargo build --release
+ln -sf "$PWD/target/release/docp" ~/.local/bin/docp   # or: cp ... /usr/local/bin/
+```
 
+Update with `git pull && cargo build --release`; the symlink picks up the new
+binary. Uninstall with `rm ~/.local/bin/docp` and delete the clone.
+
+## Usage
+
+```sh
 docp image.png              # image viewer
 docp notes.md               # markdown, re-renders on save
 docp paper.pdf              # PDF, fit-width, n/p pages, z/Z zoom
@@ -88,42 +126,30 @@ and in the status bar.
 ## Neovim + Rex: synced preview
 
 Edit Markdown in Neovim with a live docp pane beside it; scrolling in either
-pane follows the other. The plugin lives in [`nvim/`](nvim/) of this repository
-and currently requires [Rex](https://github.com/tfcace/rex) (the pane is opened
-with `rex split`).
+pane follows the other. Requires Neovim 0.10+, a Rust toolchain and
+[Rex](https://github.com/tfcace/rex) (the pane is opened with `rex split`).
 
-Build the binary first and put it on `PATH` (or pass its absolute path as
-`docp_bin`):
-
-```sh
-git clone https://github.com/SixinVang/kitty-doc-preview
-cd kitty-doc-preview
-cargo build --release
-ln -sf "$PWD/target/release/docp" ~/.local/bin/docp   # or: cargo install --path crates/docp
-```
-
-Then install the plugin. With lazy.nvim the Neovim files are in the repo's
-`nvim/` subdirectory, so point `runtimepath` at it from `config`:
+Install with lazy.nvim — it clones the repo and builds the `docp` binary for
+you, no manual clone:
 
 ```lua
 {
   "SixinVang/kitty-doc-preview",
   name = "docp",
   lazy = false, -- config() adds nvim/ to 'runtimepath'
+  build = "cargo build --release",
   config = function(plugin)
     vim.opt.rtp:append(plugin.dir .. "/nvim")
-    require("docp").setup({ docp_bin = "docp" })
+    require("docp").setup({ docp_bin = plugin.dir .. "/target/release/docp" })
   end,
 }
 ```
 
-Without a plugin manager, clone the repo and add its `nvim/` directory to
-`runtimepath` before plugins load:
+The first `build` compiles the workspace (MuPDF included, a few minutes).
+Rebuild after updates with `:Lazy build docp`.
 
-```lua
-vim.opt.rtp:append(vim.fn.expand("~/src/kitty-doc-preview/nvim"))
-require("docp").setup({ docp_bin = "docp" })
-```
+Already have `docp` on your `PATH` (see [Install](#install))? Drop `build` and
+pass `docp_bin = "docp"`.
 
 Then, in a Markdown buffer inside a Rex pane:
 
@@ -137,6 +163,26 @@ Then, in a Markdown buffer inside a Rex pane:
 `ratio` (share of the Rex split, default 50), `debounce` (ms, default 40),
 `takeover_ms` (how long preview-driven scrolls suppress editor echo, default
 120).
+
+### Standalone binary
+
+If you only want the plugin without lazy's build step — or want `docp` on
+`PATH` for the CLI too — install it with Cargo (see [Install](#install) for
+updating and uninstalling):
+
+```sh
+cargo install --git https://github.com/SixinVang/kitty-doc-preview docp
+```
+
+### Without a plugin manager
+
+Clone the repo and add its `nvim/` directory to `runtimepath` before plugins
+load, then build the binary as above:
+
+```lua
+vim.opt.rtp:append(vim.fn.expand("~/src/kitty-doc-preview/nvim"))
+require("docp").setup({ docp_bin = "docp" })
+```
 
 Under the hood `docp --ipc <socket> file.md` serves newline-delimited JSON on a
 Unix socket: the editor sends the top visible line (`sync`), the preview

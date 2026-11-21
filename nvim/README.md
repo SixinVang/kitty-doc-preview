@@ -10,41 +10,43 @@ Rex terminal).
 
 ## Install
 
-This plugin ships inside the docp repository, under `nvim/`, and talks to the
-`docp` binary. Source of truth:
+This plugin ships inside the docp repository, under `nvim/`. Source of truth:
 <https://github.com/SixinVang/kitty-doc-preview>
 
-```sh
-git clone https://github.com/SixinVang/kitty-doc-preview
-cd kitty-doc-preview
-cargo build --release
-ln -sf "$PWD/target/release/docp" ~/.local/bin/docp   # or: cargo install --path crates/docp
-```
-
-With lazy.nvim, add the repo and put its `nvim/` directory on `runtimepath`:
+lazy.nvim installs the plugin and builds the `docp` binary for you:
 
 ```lua
 {
   "SixinVang/kitty-doc-preview",
   name = "docp",
   lazy = false, -- config() adds nvim/ to 'runtimepath'
+  build = "cargo build --release",
   config = function(plugin)
     vim.opt.rtp:append(plugin.dir .. "/nvim")
-    require("docp").setup({ docp_bin = "docp" })
+    require("docp").setup({ docp_bin = plugin.dir .. "/target/release/docp" })
   end,
 }
 ```
 
-Without a plugin manager, add `nvim/` from the clone to `runtimepath` before
-plugins load:
+The first `build` compiles the Rust workspace (MuPDF included, a few minutes);
+rebuild after updates with `:Lazy build docp`. If `docp` is already on `PATH`,
+drop `build` and pass `docp_bin = "docp"`.
+
+Standalone binary (optional; see the main
+[README install section](../../README.md#install) for updating and
+uninstalling):
+
+```sh
+cargo install --git https://github.com/SixinVang/kitty-doc-preview docp
+```
+
+Without a plugin manager, clone the repo, add its `nvim/` directory to
+`runtimepath` before plugins load, and build the binary:
 
 ```lua
 vim.opt.rtp:append(vim.fn.expand("~/src/kitty-doc-preview/nvim"))
 require("docp").setup({ docp_bin = "docp" })
 ```
-
-`docp` must be built (`cargo build --release`) and either on `PATH` or given as
-an absolute path in `docp_bin`.
 
 ## Commands
 
@@ -62,7 +64,7 @@ Opt-in: no preview opens automatically and no autocmds exist until
 
 ```lua
 require("docp").setup({
-  docp_bin = "docp",   -- name on PATH or an absolute path
+  docp_bin = "docp",   -- name on PATH or an absolute path (lazy: plugin.dir.."/target/release/docp")
   docp_args = {},      -- extra docp flags, before --ipc
   ratio = 50,          -- percent of the Rex split given to the preview
   debounce = 40,       -- ms between an editor scroll and its sync message
