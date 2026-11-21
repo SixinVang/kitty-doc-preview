@@ -197,6 +197,54 @@ answers with its top block's line (`top`). Rendering still reloads on save;
 sync is block-granular in v1 (see
 [ARCHITECTURE §5.4](docs/ARCHITECTURE.md#54-编辑器同步neovim--rex)).
 
+## Agent skill: opening documents from an agent
+
+The repo ships an [Agent Skills](https://agentskills.io/specification) skill in
+[`skill/docp-preview/`](skill/docp-preview/SKILL.md) that teaches an agent when
+and how to put a Markdown, PDF or image file into a docp preview pane with
+`rex split`, then reuse, steer and close it. The skill bundles
+`scripts/docp-pane.sh`, which opens a pane idempotently (reuse by
+`docp: <basename>` label), verifies that docp actually rendered, and closes the
+pane again when docp bails out.
+
+Install it once by linking the directory into a skills location. User-wide, for
+any project (Pi and other Agent Skills hosts):
+
+```sh
+git clone https://github.com/SixinVang/kitty-doc-preview ~/src/kitty-doc-preview
+mkdir -p ~/.agents/skills
+ln -sfn ~/src/kitty-doc-preview/skill/docp-preview ~/.agents/skills/docp-preview
+```
+
+Or per project, committed with the code (discovered from the working directory
+up to the repository root):
+
+```sh
+mkdir -p .agents/skills
+ln -sfn ../../skill/docp-preview .agents/skills/docp-preview   # or: cp -R
+```
+
+Pi also scans `~/.pi/agent/skills/` and `.pi/skills/`, and any directory listed
+under the `skills` setting; copying or linking the same directory there works
+too. Verify with `/skill:docp-preview` (or the skill appears in the startup
+skill list), run `/reload` after editing it. A link is enough — the script
+resolves everything relative to its own directory, and `docp` must be on
+`PATH` (`command -v docp`).
+
+Typical agent use, after the skill loads:
+
+```sh
+~/.agents/skills/docp-preview/scripts/docp-pane.sh open docs/ARCHITECTURE.md
+~/.agents/skills/docp-preview/scripts/docp-pane.sh open paper.pdf --page 12 --ratio 55
+~/.agents/skills/docp-preview/scripts/docp-pane.sh list
+~/.agents/skills/docp-preview/scripts/docp-pane.sh close docs/ARCHITECTURE.md
+```
+
+The pane is opened with `--focus=false` and a `docp: <basename>` label. Editing
+the file reloads it in place, so the agent saves instead of reopening. docp dies
+with `q` or when the pane is closed; PDF text extraction is not part of the
+skill because `--cat` only supports Markdown.
+
 ## Architecture
 
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). Crates:
