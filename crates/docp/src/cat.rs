@@ -20,7 +20,6 @@ pub fn run(file: &Path, kind: Kind, caps: &Caps, theme: &Theme, max_width: usize
 
 fn markdown(file: &Path, caps: &Caps, theme: &Theme, max_width: usize) -> Result<()> {
     let src = std::fs::read_to_string(file)?;
-    let d = doc::parse(&src);
     // Honour the configured clamp whether or not stdout is a terminal.
     let avail = if std::io::stdout().is_terminal() {
         caps.cols as usize
@@ -28,6 +27,17 @@ fn markdown(file: &Path, caps: &Caps, theme: &Theme, max_width: usize) -> Result
         DEFAULT_COLS
     };
     let width = avail.clamp(20, max_width.max(20));
+    let out = markdown_text(&src, theme, width);
+    let mut o = std::io::stdout().lock();
+    o.write_all(out.as_bytes())?;
+    o.flush()?;
+    Ok(())
+}
+
+/// Render Markdown to styled terminal text. Kept separate from I/O so the
+/// code-block highlighting path (including SGR output) is unit-testable.
+pub(crate) fn markdown_text(src: &str, theme: &Theme, width: usize) -> String {
+    let d = doc::parse(src);
     let ctx = text::Ctx { theme };
     let mut out = String::new();
     for (i, block) in d.blocks.iter().enumerate() {
@@ -40,10 +50,7 @@ fn markdown(file: &Path, caps: &Caps, theme: &Theme, max_width: usize) -> Result
             out.push('\n');
         }
     }
-    let mut o = std::io::stdout().lock();
-    o.write_all(out.as_bytes())?;
-    o.flush()?;
-    Ok(())
+    out
 }
 
 fn image(file: &Path, caps: &Caps) -> Result<()> {
@@ -67,4 +74,23 @@ fn image(file: &Path, caps: &Caps) -> Result<()> {
     o.write_all(&buf)?;
     o.flush()?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fenced_code_emits_syntax_colors() {
+        let theme = Theme::dark_default();
+        let out = markdown_text("```rust\nfn main() { let x = 1; }\n```\n", &theme, 80);
+        assert!(out.contains("38;2;"), "no foreground color: {out:?}");
+    }
+
+    #[test]
+    fn plain_markdown_stays_uncolored() {
+        let theme = Theme::dark_default();
+        let out = markdown_text("hello world\n", &theme, 80);
+        assert!(!out.contains("38;2;"), "unexpected color: {out:?}");
+    }
 }

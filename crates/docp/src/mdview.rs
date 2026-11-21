@@ -131,6 +131,9 @@ pub fn run(
     ipc_path: Option<&Path>,
 ) -> anyhow::Result<()> {
     crate::caps::settle(&mut caps);
+    // The embedded syntax dump is ~1.4 MB compressed; decompress it off the
+    // main thread so the first visible code block does not stall frame one.
+    std::thread::spawn(render_md::highlight::preload);
     let path = std::fs::canonicalize(path)?;
     render_md::fonts::warm_system();
     let (pele_tx, pele_rx) = unbounded();

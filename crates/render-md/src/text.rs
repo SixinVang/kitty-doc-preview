@@ -568,12 +568,17 @@ fn hard_wrap(s: &str, width: usize, attrs: Attrs) -> Vec<Line> {
 }
 
 /// Hard-wrap already-colored code pieces at `width` columns.
+///
+/// A code line is a run of pieces with independent colors, so cells must be
+/// flushed whenever the style changes. Accumulating the whole line and
+/// flushing it with `base` at the end would drop every highlight.
 fn wrap_pieces(pieces: &[highlight::Piece], width: usize, base: Attrs) -> Vec<Line> {
     let mut out = Vec::new();
     let mut line = Line::default();
     let mut cur = String::new();
+    let mut cur_attrs = base;
     let mut col = 0usize;
-    let push = |line: &mut Line, cur: &mut String, attrs: Attrs| {
+    let flush = |line: &mut Line, cur: &mut String, attrs: Attrs| {
         if !cur.is_empty() {
             line.cells.push(Cell {
                 text: std::mem::take(cur),
@@ -589,16 +594,22 @@ fn wrap_pieces(pieces: &[highlight::Piece], width: usize, base: Attrs) -> Vec<Li
         attrs.italic |= p.italic;
         for ch in p.text.chars() {
             let cw = ch.width().unwrap_or(0);
-            if col + cw > width && !cur.is_empty() {
-                push(&mut line, &mut cur, attrs);
+            if col + cw > width && col > 0 {
+                flush(&mut line, &mut cur, cur_attrs);
                 out.push(std::mem::take(&mut line));
                 col = 0;
+            }
+            // Zero-width chars (combining marks, ZWJ, VS16) stay with the
+            // preceding cell; splitting runs on them would break the glyph.
+            if cw > 0 && attrs != cur_attrs {
+                flush(&mut line, &mut cur, cur_attrs);
+                cur_attrs = attrs;
             }
             cur.push(ch);
             col += cw;
         }
     }
-    push(&mut line, &mut cur, base);
+    flush(&mut line, &mut cur, cur_attrs);
     out.push(line);
     out
 }
@@ -715,6 +726,51 @@ mod tests {
         let out = render("```\n\tfmt.Println()\n```\n", 40);
         assert!(!out[0].contains('\t'), "{out:?}");
         assert!(out[0].starts_with("     fmt"), "{out:?}");
+    }
+
+    fn code_lines(md: &str, width: usize) -> Vec<Line> {
+        let theme = Theme::dark_default();
+        let ctx = Ctx { theme: &theme };
+        let d = doc::parse(md);
+        ctx.node(&d.blocks[0].node, width)
+    }
+
+    #[test]
+    fn code_blocks_keep_syntax_colors() {
+        let lines = code_lines("```rust\nfn main() { let x = 1; }\n```\n", 80);
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.cells.iter().any(|c| c.attrs.fg.is_some())),
+            "code block lost its colors: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn wrapped_code_lines_keep_colors() {
+        let lines = code_lines(
+            "```rust\nfn very_long_name(a: u32, b: u32) -> u32 { a + b }\n```\n",
+            28,
+        );
+        assert!(lines.len() > 1, "expected wrapping: {lines:?}");
+        for (i, l) in lines.iter().enumerate() {
+            assert!(l.fill.is_some(), "line {i} lost the code background");
+            assert!(
+                l.cells.iter().any(|c| c.attrs.fg.is_some()),
+                "line {i} lost its colors: {l:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn unknown_language_stays_plain() {
+        let lines = code_lines("```not-a-language\nlet x = 1;\n```\n", 80);
+        assert!(
+            lines
+                .iter()
+                .all(|l| l.cells.iter().all(|c| c.attrs.fg.is_none())),
+            "unknown language got colors: {lines:?}"
+        );
     }
 
     #[test]
