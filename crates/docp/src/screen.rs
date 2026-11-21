@@ -4,7 +4,7 @@
 
 use crate::caps::{self, Caps};
 use anyhow::Result;
-use docmodel::{Attrs, Cell, Line, Rgb};
+use docmodel::{Attrs, Cell, Line, Rgb, Theme};
 use std::io::{stdout, Write};
 use unicode_width::UnicodeWidthStr;
 
@@ -19,6 +19,8 @@ pub struct Frame {
 
 pub struct Screen {
     pub caps: Caps,
+    /// Theme used for chrome (status bar) so it belongs to the page.
+    pub theme: Theme,
     prev: Vec<String>,
     prev_status: String,
 }
@@ -44,9 +46,10 @@ pub fn leave() {
 }
 
 impl Screen {
-    pub fn new(caps: Caps) -> Screen {
+    pub fn new(caps: Caps, theme: Theme) -> Screen {
         Screen {
             caps,
+            theme,
             prev: Vec::new(),
             prev_status: String::new(),
         }
@@ -90,7 +93,7 @@ impl Screen {
             buf.extend_from_slice(format!("\x1b[{};1H\x1b[K", i + 1).as_bytes());
         }
 
-        let status = status_bar(cols, &frame.status_left, &frame.status_right);
+        let status = status_bar(cols, &frame.status_left, &frame.status_right, &self.theme);
         if status != self.prev_status {
             buf.extend_from_slice(format!("\x1b[{};1H", self.caps.rows).as_bytes());
             buf.extend_from_slice(status.as_bytes());
@@ -112,10 +115,11 @@ impl Screen {
 /// Stops one column short of the edge: writing the last column puts the
 /// terminal in a pending-wrap state, which some terminals resolve by
 /// scrolling when the next frame starts.
-pub fn status_bar(cols: usize, left: &str, right: &str) -> String {
+pub fn status_bar(cols: usize, left: &str, right: &str, theme: &Theme) -> String {
     let cols = cols.saturating_sub(1).max(1);
-    let bar_bg = Rgb(180, 180, 180);
-    let bar_fg = Rgb(40, 40, 40);
+    // A surface tinted from the page colors, never a hardcoded gray.
+    let bar_bg = Rgb::mix(theme.bg, theme.fg, 0.10);
+    let bar_fg = theme.muted();
     let lw = left.width();
     let rw = right.width();
     let pad = cols.saturating_sub(lw + rw + 1).max(1);
@@ -168,15 +172,17 @@ mod tests {
 
     #[test]
     fn status_bar_fills_width() {
-        let s = status_bar(40, "doc.md", "42%");
+        let t = Theme::dark_default();
+        let s = status_bar(40, "doc.md", "42%", &t);
         assert!(s.contains("doc.md"));
         assert!(s.contains("42%"));
-        assert!(s.contains("\x1b[0;48;2;180;180;180m"));
+        assert!(s.contains("\x1b[0;48;2;"), "{s}");
     }
 
     #[test]
     fn status_bar_survives_narrow() {
-        let s = status_bar(5, "averylongname", "99%");
+        let t = Theme::dark_default();
+        let s = status_bar(5, "averylongname", "99%", &t);
         assert!(!s.is_empty());
     }
 }

@@ -75,13 +75,21 @@ pub fn width(text: &str, size: f32, w: Weight) -> f32 {
     for ch in text.chars() {
         total += match face.glyph_index(ch).and_then(|g| face.glyph_hor_advance(g)) {
             Some(adv) => adv as f32 * scale,
-            // Glyphs the embedded fonts lack come from a system font; this is
-            // close enough for wrapping and layout.
-            None if ch.is_whitespace() => size * 0.28,
+            // Glyphs the embedded fonts lack come from a system font. CJK and
+            // other wide characters occupy a full em, not the ~0.6 em of a
+            // Latin letter; getting this wrong makes diagrams and heading
+            // wrapping overlap.
+            None if ch == '\t' || ch.is_whitespace() => size * 0.28,
+            None if is_wide(ch) => size,
             None => size * 0.62,
         };
     }
     total
+}
+
+fn is_wide(ch: char) -> bool {
+    use unicode_width::UnicodeWidthChar;
+    ch.width() == Some(2)
 }
 
 /// True when every non-space character exists in the embedded sans fonts.
@@ -165,5 +173,22 @@ mod tests {
     fn coverage() {
         assert!(covers("Plan: phase 2 (draft)"));
         assert!(!covers("שלום"));
+    }
+
+    #[test]
+    fn wide_glyphs_measure_one_em() {
+        // CJK glyphs are double-width; measuring them as Latin would make
+        // Mermaid labels overlap and headings wrap wrong.
+        let one = width("中", 16.0, Weight::Regular);
+        assert!((one - 16.0).abs() < 0.5, "{one}");
+        let three = width("中文字", 16.0, Weight::Regular);
+        assert!((three - 48.0).abs() < 1.5, "{three}");
+    }
+
+    #[test]
+    fn latin_wide_is_narrower_than_cjk() {
+        let latin = width("iii", 16.0, Weight::Regular);
+        let cjk = width("中", 16.0, Weight::Regular);
+        assert!(latin < cjk);
     }
 }

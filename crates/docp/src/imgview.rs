@@ -43,7 +43,7 @@ pub fn run(file: &Path, caps: Caps) -> Result<()> {
         status: String::new(),
         out: Vec::new(),
     };
-    let mut screen = Screen::new(caps.clone());
+    let mut screen = Screen::new(caps.clone(), caps.terminal_theme.clone());
     v.rebuild(&mut screen, false);
     let result = v.event_loop(&mut screen);
     let mut bye = Vec::new();

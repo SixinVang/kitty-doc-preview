@@ -71,7 +71,25 @@ pub fn detect(timeout_ms: u64) -> Result<Caps> {
     // Feature query inconclusive (e.g. Rex EINVALs on it) -> assume the
     // terminal follows the protocol baseline it already confirmed.
     let placeholders = p.placeholders.unwrap_or(p.graphics);
-    let terminal_theme = Theme::from_osc(&buf, Theme::dark_default());
+
+    // Base the theme on the terminal's light/dark preference, then overlay
+    // whatever colors it actually reported. Querying colors alone is not
+    // enough: a terminal can stay silent on OSC 10/11 and we must not fall
+    // back to a dark palette in a light window.
+    let base = match p.appearance {
+        Some(kgp::Appearance::Light) => Theme::light_default(),
+        Some(kgp::Appearance::Dark) => Theme::dark_default(),
+        None => match std::env::var("COLORFGBG")
+            .ok()
+            .as_deref()
+            .and_then(parse_colorfgbg)
+        {
+            Some(true) => Theme::light_default(),
+            Some(false) => Theme::dark_default(),
+            None => Theme::dark_default(),
+        },
+    };
+    let terminal_theme = Theme::from_osc(&buf, base);
 
     let mut file_transfer = false;
     if p.graphics {
@@ -87,6 +105,13 @@ pub fn detect(timeout_ms: u64) -> Result<Caps> {
         file_transfer,
         terminal_theme,
     })
+}
+
+/// `COLORFGBG` is `fg;bg` (or `fg;...;bg`) with ANSI palette indices; a high
+/// background index means a light terminal. Returns `Some(is_light)`.
+fn parse_colorfgbg(v: &str) -> Option<bool> {
+    let bg: u16 = v.rsplit(';').next()?.trim().parse().ok()?;
+    Some(bg >= 7)
 }
 
 /// `t=f` probe: a real regular file with real PNG bytes.

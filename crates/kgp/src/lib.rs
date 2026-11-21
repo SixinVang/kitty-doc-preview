@@ -126,6 +126,9 @@ pub fn placeholder_row(id: u32, row: u16, cols: u16) -> String {
 /// terminal is done replying.
 pub fn probe_body() -> Vec<u8> {
     let mut v = Vec::new();
+    // Appearance first: this is the authoritative light/dark signal and some
+    // terminals (Rex) do not answer the fg/bg queries in every theme.
+    v.extend_from_slice(b"\x1b[?996n");
     v.extend_from_slice(b"\x1b[16t");
     v.extend_from_slice(b"\x1b_Gi=31,s=1,v=1,a=q,t=d,f=24;AAAA\x1b\\");
     // feature query for Unicode placeholders; some terminals (Rex) require
@@ -167,6 +170,15 @@ pub struct Probe {
     pub file_transfer: bool,
     /// A DA1 reply was seen (probe terminator).
     pub da1: bool,
+    /// Light/dark preference from `CSI ? 996 n` (kitty color-scheme query).
+    pub appearance: Option<Appearance>,
+}
+
+/// Terminal color-scheme preference.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Appearance {
+    Dark,
+    Light,
 }
 
 /// Parse a probe response stream (see `probe_queries`). `file_id` is the id
@@ -242,6 +254,15 @@ pub fn parse_probe(buf: &[u8], file_id: Option<u32>) -> Probe {
             }
         }
     }
+
+    // Color-scheme reply: ESC [ ? 997 ; 1 n (dark) or ; 2 n (light)
+    if let Some(i) = find(buf, b"\x1b[?997;") {
+        match buf.get(i + 7).copied() {
+            Some(b'1') => p.appearance = Some(Appearance::Dark),
+            Some(b'2') => p.appearance = Some(Appearance::Light),
+            _ => {}
+        }
+    }
     p
 }
 
@@ -311,6 +332,15 @@ mod tests {
         let s = String::from_utf8_lossy(&out).into_owned();
         assert!(s.starts_with("\x1b_Ga=T,U=1,f=100,i=9,p=1,c=4,r=2,q=2,m=0;"));
         assert!(s.ends_with("\x1b\\"));
+    }
+
+    #[test]
+    fn parse_appearance() {
+        let p = parse_probe(b"\x1b[?997;2n\x1b[?62;22c", None);
+        assert_eq!(p.appearance, Some(Appearance::Light));
+        let p = parse_probe(b"\x1b[?997;1n\x1b[?62;22c", None);
+        assert_eq!(p.appearance, Some(Appearance::Dark));
+        assert_eq!(parse_probe(b"\x1b[?62;22c", None).appearance, None);
     }
 
     #[test]

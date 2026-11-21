@@ -142,14 +142,14 @@ pub fn heading(h: &Heading, color: Rgb, cell: Cell) -> Result<Raster, String> {
         ));
     }
     svg.push_str("</svg>");
-    draw(
-        &svg,
-        fonts::embedded(),
-        h.cols,
-        h.rows(),
-        cell,
-        Transform::identity(),
-    )
+    // Headings in CJK (or any script the embedded fonts lack) fall back to
+    // system fonts rather than dropping back to plain terminal text.
+    let db = if needs_system_fonts(&svg) {
+        fonts::with_system()
+    } else {
+        fonts::embedded()
+    };
+    draw(&svg, db, h.cols, h.rows(), cell, Transform::identity())
 }
 
 fn draw(
@@ -241,6 +241,15 @@ mod tests {
         assert!(h.lines.len() > 1);
         assert!(h.cols <= 30);
         assert_eq!(h.rows(), 3 * h.lines.len() as u16);
+    }
+
+    #[test]
+    fn heading_rasterizes_cjk_via_system_fonts() {
+        let h = layout_heading("中文标题", 1, CELL, 40);
+        assert_eq!(h.lines.len(), 1);
+        assert!(h.cols <= 40, "{} cols", h.cols);
+        let r = heading(&h, Rgb(0, 0, 0), CELL).unwrap();
+        assert_eq!(r.rows, 3);
     }
 
     #[test]

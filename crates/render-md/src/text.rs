@@ -129,7 +129,7 @@ impl Ctx<'_> {
             Some(Alert::Important) => (t.purple(), Some("Important")),
             Some(Alert::Warning) => (t.yellow(), Some("Warning")),
             Some(Alert::Caution) => (t.red(), Some("Caution")),
-            None => (t.faint(), None),
+            None => (docmodel::Rgb::mix(t.fg, t.bg, 0.55), None),
         };
         let bar = Cell {
             text: "▎ ".into(),
@@ -366,6 +366,15 @@ impl Ctx<'_> {
         for row in rows {
             emit_row(row, Attrs::default(), &mut out);
         }
+        // Close the table with a rule so it does not look like loose text.
+        let mut bottom = Line::default();
+        let parts: Vec<String> = want.iter().map(|w| "─".repeat(*w)).collect();
+        bottom.cells.push(Cell {
+            text: parts.join("─┴─"),
+            attrs: border,
+            url: None,
+        });
+        out.push(bottom);
         out
     }
 
@@ -419,10 +428,16 @@ impl Ctx<'_> {
                         }
                         if ww > width {
                             // A word longer than the line: break it by cells.
+                            // CJK has no spaces, so this is the normal path for
+                            // Chinese text; keep closing punctuation off the
+                            // start of the next line (禁则处理).
                             let mut chunk = String::new();
                             for ch in w.chars() {
                                 let cw = ch.width().unwrap_or(0);
-                                if col + cw > width {
+                                // Hanging punctuation (禁则): never start a
+                                // line with a closing mark; let it overflow by
+                                // at most one column instead.
+                                if col + cw > width && !is_closing_punct(ch) {
                                     let line = lines.last_mut().unwrap();
                                     line.cells.push(Cell {
                                         text: std::mem::take(&mut chunk),
@@ -460,6 +475,29 @@ impl Ctx<'_> {
         }
         lines
     }
+}
+
+/// Closing punctuation that must not begin a line in Chinese typography.
+fn is_closing_punct(ch: char) -> bool {
+    matches!(
+        ch,
+        '。' | '，'
+            | '、'
+            | '；'
+            | '：'
+            | '！'
+            | '？'
+            | '）'
+            | '】'
+            | '》'
+            | '」'
+            | '』'
+            | '”'
+            | '’'
+            | '…'
+            | '·'
+            | '～'
+    ) || matches!(ch, '.' | ',' | ';' | ':' | '!' | '?' | ')' | ']' | '}')
 }
 
 enum Piece<'a> {
@@ -642,6 +680,17 @@ mod tests {
         let out = render("```\n\tfmt.Println()\n```\n", 40);
         assert!(!out[0].contains('\t'), "{out:?}");
         assert!(out[0].starts_with("     fmt"), "{out:?}");
+    }
+
+    #[test]
+    fn closing_punctuation_never_starts_a_line() {
+        let out = render("这是一句需要折行的中文，后面接标点符号。", 12);
+        for line in &out {
+            assert!(
+                !line.starts_with(['。', '，', '、', '）']),
+                "line starts with punctuation: {line:?} in {out:?}"
+            );
+        }
     }
 
     #[test]

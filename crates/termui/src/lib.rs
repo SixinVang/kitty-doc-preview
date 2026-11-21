@@ -89,16 +89,89 @@ pub enum Stop {
 
 /// Write `queries` to /dev/tty in raw mode and collect the reply until
 /// `stop` is satisfied or `timeout` elapses.
+///
+/// Never calls `tcflush`: Rex answers color queries with a stale dark theme
+/// (and drops the OSC 10/11 replies entirely) if the input queue is flushed
+/// right before the query. Discarding by reading instead is equivalent for
+/// our purposes and does not disturb the terminal.
 pub fn query_tty(queries: &[u8], stop: Stop, timeout: Duration) -> io::Result<Vec<u8>> {
     let fd = open_tty()?;
+    trace(format_args!("query start fd={fd} bytes={}", queries.len()));
     let res = (|| {
         let _raw = RawGuard::new(fd)?;
-        unsafe { libc::tcflush(fd, libc::TCIFLUSH) };
+        // Non-blocking for the whole exchange: a poll() POLLIN in cooked mode
+        // can still return zero bytes and a read() would block on macOS.
+        set_nonblocking(fd)?;
+        trace(format_args!("raw ok"));
+        drain_input(fd, Duration::from_millis(8));
+        trace(format_args!("drained"));
         write_all_fd(fd, queries)?;
-        read_until(fd, &stop, timeout)
+        trace(format_args!("written"));
+        let r = read_until(fd, &stop, timeout);
+        trace(format_args!(
+            "read done len={:?}",
+            r.as_ref().map(|v| v.len())
+        ));
+        r
     })();
     unsafe { libc::close(fd) };
     res
+}
+
+/// Debug tracing for the probe path (`DOCP_TRACE=FILE`).
+fn trace(args: std::fmt::Arguments) {
+    use std::io::Write as _;
+    let Some(path) = std::env::var_os("DOCP_TRACE") else {
+        return;
+    };
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
+        let _ = writeln!(f, "[{:?}] {args}", std::process::id());
+    }
+}
+
+fn set_nonblocking(fd: i32) -> io::Result<()> {
+    unsafe {
+        let flags = libc::fcntl(fd, libc::F_GETFL);
+        if flags < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        if libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) < 0 {
+            return Err(io::Error::last_os_error());
+        }
+    }
+    Ok(())
+}
+
+/// Read whatever is already pending, without ever blocking.
+fn drain_input(fd: i32, window: Duration) {
+    let deadline = Instant::now() + window;
+    let mut chunk = [0u8; 1024];
+    while Instant::now() < deadline {
+        match read_nonblocking(fd, &mut chunk) {
+            Some(n) if n > 0 => continue,
+            _ => break,
+        }
+    }
+}
+
+/// One non-blocking read: `Some(0)` when nothing is buffered.
+fn read_nonblocking(fd: i32, chunk: &mut [u8]) -> Option<usize> {
+    let n = unsafe { libc::read(fd, chunk.as_mut_ptr() as *mut libc::c_void, chunk.len()) };
+    if n > 0 {
+        Some(n as usize)
+    } else if n == 0 {
+        Some(0)
+    } else {
+        let e = io::Error::last_os_error();
+        match e.kind() {
+            io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted => Some(0),
+            _ => None,
+        }
+    }
 }
 
 fn write_all_fd(fd: i32, mut data: &[u8]) -> io::Result<()> {
@@ -138,18 +211,14 @@ fn read_until(fd: i32, stop: &Stop, timeout: Duration) -> io::Result<Vec<u8>> {
         if r == 0 {
             break; // timed out
         }
-        let n = unsafe { libc::read(fd, chunk.as_mut_ptr() as *mut libc::c_void, chunk.len()) };
-        if n < 0 {
-            let e = io::Error::last_os_error();
-            if e.kind() == io::ErrorKind::Interrupted {
-                continue;
+        match read_nonblocking(fd, &mut chunk) {
+            Some(0) => continue, // nothing yet; keep waiting until the deadline
+            Some(n) => {
+                trace(format_args!("read {n} bytes"));
+                buf.extend_from_slice(&chunk[..n]);
             }
-            return Err(e);
+            None => break,
         }
-        if n == 0 {
-            break; // EOF
-        }
-        buf.extend_from_slice(&chunk[..n as usize]);
     }
     Ok(buf)
 }

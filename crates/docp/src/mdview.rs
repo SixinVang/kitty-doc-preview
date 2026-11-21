@@ -8,7 +8,7 @@ use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, Mou
 use docmodel::{Attrs, Cell, Line, Row, Theme};
 use notify::Watcher;
 use render_md::raster::{self, Cell as PixelCell};
-use render_md::{doc, fonts, pele, svgflat, text};
+use render_md::{doc, pele, svgflat, text};
 use std::collections::{HashMap, HashSet};
 use std::hash::Hash;
 use std::path::{Path, PathBuf};
@@ -109,6 +109,7 @@ pub fn run(path: &Path, caps: Caps, theme: Theme) -> anyhow::Result<()> {
 
     let (done_tx, done_rx) = unbounded();
     let (cw, ch) = (caps.cell.0.max(1) as u32, caps.cell.1.max(1) as u32);
+    let mut screen = Screen::new(caps.clone(), theme.clone());
     let mut app = App {
         name: path
             .file_name()
@@ -144,7 +145,6 @@ pub fn run(path: &Path, caps: Caps, theme: Theme) -> anyhow::Result<()> {
         out: Vec::new(),
     };
 
-    let mut screen = Screen::new(caps.clone());
     crate::screen::enter()?;
     let prev_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
@@ -497,6 +497,10 @@ impl App {
         for i in 0..self.doc.blocks.len() {
             if i > 0 {
                 rows.push(Row::Text(Line::default()));
+                // Headings get extra air above them so sections read apart.
+                if matches!(self.doc.blocks[i].node, doc::Node::Heading { .. }) {
+                    rows.push(Row::Text(Line::default()));
+                }
             }
             starts.push(rows.len());
             for kind in self.block_rows(
@@ -569,7 +573,7 @@ impl App {
         };
         match kind {
             Kind::Heading(level, text) => {
-                if !fonts::covers(&text) || text.trim().is_empty() {
+                if text.trim().is_empty() {
                     return self.text_rows(i, width, used_text);
                 }
                 let spec = raster::layout_heading(&text, level, self.cell, width as u16);
