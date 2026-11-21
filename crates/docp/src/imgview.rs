@@ -128,6 +128,7 @@ impl Viewer {
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_default();
+            let mut s = String::from("\x1b[0m");
             let line = Line {
                 cells: vec![
                     Cell::new(
@@ -152,7 +153,8 @@ impl Viewer {
                 ],
                 fill: None,
             };
-            return line.render(screen.caps.cols as usize);
+            s.push_str(&line.render(screen.caps.cols as usize));
+            return s;
         }
         let ir = content - 1;
         if ir < self.img_rows as usize && !self.tiles.is_empty() {

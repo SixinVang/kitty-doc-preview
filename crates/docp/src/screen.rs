@@ -97,6 +97,7 @@ impl Screen {
         if status != self.prev_status {
             buf.extend_from_slice(format!("\x1b[{};1H", self.caps.rows).as_bytes());
             buf.extend_from_slice(status.as_bytes());
+            buf.extend_from_slice(b"\x1b[0m");
             self.prev_status = status;
         }
 

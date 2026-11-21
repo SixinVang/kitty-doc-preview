@@ -108,15 +108,17 @@ pub fn delete_all(out: &mut Vec<u8>) {
 pub fn placeholder_row(id: u32, row: u16, cols: u16) -> String {
     let d = &*DIACRITICS;
     let (r, g, b) = ((id >> 16) & 0xff, (id >> 8) & 0xff, id & 0xff);
-    let mut s = String::with_capacity(32 + cols as usize * 5);
-    let _ = write!(s, "\x1b[38;2;{r};{g};{b}m");
+    let mut s = String::with_capacity(40 + cols as usize * 5);
+    // Full reset first: a leftover background from a previous row would be
+    // painted over the image and wash it out.
+    let _ = write!(s, "\x1b[0m\x1b[38;2;{r};{g};{b}m");
     s.push(PLACEHOLDER);
     s.push(d[row as usize % d.len()]);
     s.push(d[0]);
     for _ in 1..cols {
         s.push(PLACEHOLDER);
     }
-    s.push_str("\x1b[39m");
+    s.push_str("\x1b[0m");
     s
 }
 
@@ -299,10 +301,12 @@ mod tests {
     #[test]
     fn placeholder_encodes_id_and_row() {
         let s = placeholder_row(0x010203, 2, 3);
-        assert!(s.starts_with("\x1b[38;2;1;2;3m"));
+        // Reset first, then the id color: an inherited background would be
+        // composited over the image.
+        assert!(s.starts_with("\x1b[0m\x1b[38;2;1;2;3m"), "{s:?}");
         let chars: Vec<char> = s.chars().filter(|c| *c == PLACEHOLDER).collect();
         assert_eq!(chars.len(), 3);
-        assert!(s.ends_with("\x1b[39m"));
+        assert!(s.ends_with("\x1b[0m"));
     }
 
     #[test]

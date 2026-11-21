@@ -859,6 +859,13 @@ impl App {
         }
         match d.result {
             Ok(r) => {
+                if let Some(dir) = std::env::var_os("DOCP_DUMP_RASTER") {
+                    let _ = std::fs::write(
+                        std::path::Path::new(&dir)
+                            .join(format!("{:x}-{}x{}.png", d.key, r.cols, r.rows)),
+                        &r.png,
+                    );
+                }
                 let id = kgp::alloc_id();
                 kgp::transmit(&mut self.out, id, &r.png, r.cols, r.rows);
                 self.media.insert(
@@ -885,7 +892,9 @@ impl App {
         let now = Instant::now();
         let mut rows = Vec::with_capacity(h);
         for y in 0..h {
-            let mut s = String::new();
+            // Never inherit SGR from the previous row: a stale background
+            // would be composited over any image on this row.
+            let mut s = String::from("\x1b[0m");
             if let Some(row) = self.layout.get(self.top + y) {
                 let block = self.block_at(self.top + y);
                 let marked = self

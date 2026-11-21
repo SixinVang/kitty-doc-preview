@@ -67,7 +67,27 @@ pub fn detect(timeout_ms: u64) -> Result<Caps> {
         );
     }
     let p = kgp::parse_probe(&buf, None);
-    let cell = ioctl_cell.or(p.cell).unwrap_or((8, 16));
+    // CSI 16t reports the cell size of *this* pane; the winsize ioctl can
+    // report the whole window's pixel size divided by the pane's columns,
+    // which inflates the cell and makes every image get downscaled (pale,
+    // blurry text). Trust the terminal's own answer first.
+    let cell = match (p.cell, ioctl_cell) {
+        (Some(csi), _) => csi,
+        (None, Some(io)) => io,
+        (None, None) => (8, 16),
+    };
+    trace_caps(&format!(
+        "cell csi={:?} ioctl={:?} -> {cell:?} winsize={}x{}{}",
+        p.cell,
+        ioctl_cell,
+        ws.cols,
+        ws.rows,
+        if ws.xpixel > 0 {
+            format!(" {}x{}px", ws.xpixel, ws.ypixel)
+        } else {
+            String::new()
+        }
+    ));
     // Feature query inconclusive (e.g. Rex EINVALs on it) -> assume the
     // terminal follows the protocol baseline it already confirmed.
     let placeholders = p.placeholders.unwrap_or(p.graphics);
@@ -89,7 +109,26 @@ pub fn detect(timeout_ms: u64) -> Result<Caps> {
             None => Theme::dark_default(),
         },
     };
+    let base_name = base.name;
     let terminal_theme = Theme::from_osc(&buf, base);
+    if let Some(path) = std::env::var_os("DOCP_TRACE") {
+        use std::io::Write as _;
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+        {
+            let _ = writeln!(
+                f,
+                "appearance={:?} base={} -> fg={:?} bg={:?} palette0={:?}",
+                p.appearance,
+                base_name,
+                terminal_theme.fg,
+                terminal_theme.bg,
+                terminal_theme.palette[0]
+            );
+        }
+    }
 
     let mut file_transfer = false;
     if p.graphics {
@@ -134,9 +173,22 @@ pub fn refresh_size(caps: &mut Caps) {
     if let Ok(ws) = termui::tty_winsize() {
         caps.rows = ws.rows.max(1);
         caps.cols = ws.cols.max(1);
-        if ws.xpixel > 0 && ws.cols > 0 && ws.ypixel > 0 && ws.rows > 0 {
-            caps.cell = ((ws.xpixel / ws.cols).max(1), (ws.ypixel / ws.rows).max(1));
-        }
+        // Cell pixel size does not change on resize, and recomputing it from
+        // the ioctl can pick up the window size instead of the pane's.
+    }
+}
+
+fn trace_caps(msg: &str) {
+    use std::io::Write as _;
+    let Some(path) = std::env::var_os("DOCP_TRACE") else {
+        return;
+    };
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
+        let _ = writeln!(f, "{msg}");
     }
 }
 
