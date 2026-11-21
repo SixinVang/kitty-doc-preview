@@ -2,7 +2,7 @@
 
 > kitty 图形协议终端（macOS + Rex）上的 PDF / 图片 / Markdown 预览器。
 > Rust 实现，大量代码继承自 tkmp（MIT，同作者生态）。
-> 因链接 mupdf（AGPL-3.0），本项目按 AGPL-3.0 开源。
+> 因链接 mupdf（AGPL-3.0），本项目按 AGPL-3.0-or-later 开源（见根目录 LICENSE）。
 
 ## 0. 目标与非目标
 

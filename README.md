@@ -211,5 +211,16 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). Crates:
 
 ## License
 
-AGPL-3.0-or-later (links MuPDF, itself AGPL, for the PDF backend).
-Embedded assets: Inter and JetBrains Mono (SIL OFL), Pele (MIT).
+docp is licensed under **AGPL-3.0-or-later**; the full text is in
+[LICENSE](LICENSE) and the SPDX identifier is declared in every crate's
+`Cargo.toml`.
+
+This is the most permissive license the project can ship as-is: the PDF
+backend (`crates/render-pdf`) statically links MuPDF, which is AGPL-3.0, so the
+combined binary must be AGPL. Going permissive (MIT/Apache-2.0) would require
+changing the code — e.g. dropping MuPDF or moving PDF rendering out of process.
+
+Bundled third-party assets keep their own licenses:
+
+- Inter and JetBrains Mono — SIL OFL 1.1 (`crates/render-md/assets/fonts/`)
+- Pele — MIT (`crates/render-md/assets/Pele-LICENSE`)
