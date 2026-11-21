@@ -577,6 +577,11 @@ impl App {
         match k.code {
             KeyCode::Char('q') | KeyCode::Esc => return true,
             KeyCode::Char('c') if ctrl => return true,
+            // Option+J/K: terminals without the kitty keyboard protocol report
+            // the composed macOS (US) characters with no modifier, so match
+            // those as well as a proper Alt+j/k.
+            KeyCode::Char('∆') => self.scroll(FAST_STEP, false, repaint),
+            KeyCode::Char('˚') => self.scroll(-FAST_STEP, false, repaint),
             KeyCode::Char('j') if alt => self.scroll(FAST_STEP, false, repaint),
             KeyCode::Char('k') if alt => self.scroll(-FAST_STEP, false, repaint),
             KeyCode::Char('j') | KeyCode::Down | KeyCode::Enter => self.scroll(1, true, repaint),
