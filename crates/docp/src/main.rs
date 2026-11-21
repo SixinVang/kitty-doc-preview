@@ -1,5 +1,6 @@
 mod caps;
 mod cat;
+mod clipboard;
 mod config;
 mod imgview;
 mod input;

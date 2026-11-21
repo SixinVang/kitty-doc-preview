@@ -88,7 +88,8 @@ max_width = 110              # text column clamp, in cells
 
 Keys: `j/k` scroll · `space/b` page · `d/u` half page · `g/G` top/bottom
 (`G` also follows the file) · `]`/`[` next/previous heading · `r` redraw ·
-`q` quit · mouse wheel.
+`q` quit · mouse wheel, drag to select (release copies), `y` copy again,
+`Esc` clear selection.
 
 PDF adds: `n/p` (or `]`/`[`) next/previous page · `1`–`9` jump to 10 %…90 % ·
 `z`/`Z` zoom in/out (re-rasterised, never upscaled) · `h/l` pan when zoomed ·
@@ -102,6 +103,10 @@ and in the status bar.
   highlighted code stay real terminal text — searchable, copyable, tmux-safe.
   Only what a cell grid cannot express becomes pixels: H1/H2 display headings,
   Mermaid diagrams, and embedded images.
+- **Mouse selection with copy.** Drag over the terminal text to select it; the
+  highlight follows the document when you scroll, releasing the mouse copies
+  through OSC 52 (plus a local `pbcopy`/`wl-copy`/`xclip` helper), and `y`
+  copies the current selection again.
 - **Pixels are sent once.** Images ride in the text grid as Unicode
   placeholders, so scrolling, redraws and resizes cost zero image traffic;
   a resize rescales in the terminal immediately and re-rasterizes after 80 ms.

@@ -4,10 +4,12 @@
 use crate::caps::Caps;
 use crate::input::Input;
 use crate::screen::{Frame, Screen};
-use crate::{ipc, srcmap};
+use crate::{clipboard, ipc, srcmap};
 use crossbeam_channel::{select, unbounded, Receiver, Sender};
-use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEventKind};
-use docmodel::{Attrs, Cell, Line, Row, Theme};
+use crossterm::event::{
+    Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind,
+};
+use docmodel::{Attrs, Cell, Line, Rgb, Row, Theme};
 use notify::Watcher;
 use render_md::raster::{self, Cell as PixelCell};
 use render_md::{doc, pele, svgflat, text};
@@ -25,6 +27,51 @@ const MARK: Duration = Duration::from_millis(1500);
 const EMIT_MIN: Duration = Duration::from_millis(33);
 
 const GUTTER: usize = 2;
+
+/// A character position in the laid-out document: layout row (not screen row)
+/// and display column inside the text area (left gutter excluded).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+struct Pos {
+    row: usize,
+    col: usize,
+}
+
+/// Mouse text selection. Rows are absolute layout rows, so scrolling keeps
+/// the highlight attached to the text.
+#[derive(Clone, Copy, Debug)]
+struct Selection {
+    anchor: Pos,
+    cursor: Pos,
+    dragging: bool,
+}
+
+impl Selection {
+    /// Anchor and cursor in document order.
+    fn ordered(&self) -> (Pos, Pos) {
+        if (self.anchor.row, self.anchor.col) <= (self.cursor.row, self.cursor.col) {
+            (self.anchor, self.cursor)
+        } else {
+            (self.cursor, self.anchor)
+        }
+    }
+
+    /// Selected display-column range `[from, to)` on `row`, clamped to
+    /// `width`. The cell under the cursor is included.
+    fn range_on(&self, row: usize, width: usize) -> Option<(usize, usize)> {
+        let (a, b) = self.ordered();
+        if row < a.row || row > b.row {
+            return None;
+        }
+        let from = if row == a.row { a.col } else { 0 };
+        let to = if row == b.row { b.col + 1 } else { width };
+        let to = to.min(width);
+        (to > from).then_some((from, to))
+    }
+
+    fn is_empty(&self) -> bool {
+        self.anchor == self.cursor
+    }
+}
 
 struct Flat {
     svg: Arc<String>,
@@ -105,6 +152,11 @@ pub struct App {
     edit_started: Option<Instant>,
     latency: Option<Duration>,
     message: Option<String>,
+    /// When a transient status message ("copied …") expires.
+    message_until: Option<Instant>,
+
+    /// Mouse text selection in layout coordinates.
+    selection: Option<Selection>,
 
     /// Editor sync: byte↔line map of the last parse.
     lines: srcmap::LineMap,
@@ -176,6 +228,8 @@ pub fn run(
         edit_started: Some(Instant::now()),
         latency: None,
         message: None,
+        message_until: None,
+        selection: None,
         lines: srcmap::LineMap::default(),
         ipc: None,
         ipc_idle: None,
@@ -260,6 +314,7 @@ impl App {
                 self.settle_until,
                 self.next_mark_expiry(),
                 self.emit_at,
+                self.message_until,
             ]
             .into_iter()
             .flatten()
@@ -318,6 +373,11 @@ impl App {
             }
             if self.top_dirty || self.emit_at.is_some_and(|t| t <= now) {
                 self.flush_top();
+            }
+            if self.message_until.is_some_and(|t| t <= now) {
+                self.message_until = None;
+                self.message = None;
+                repaint = true;
             }
             if reload_at.is_some_and(|t| t <= now) {
                 reload_at = None;
@@ -392,6 +452,45 @@ impl App {
                 match m.kind {
                     MouseEventKind::ScrollDown => self.scroll(3, repaint),
                     MouseEventKind::ScrollUp => self.scroll(-3, repaint),
+                    MouseEventKind::Down(MouseButton::Left) => {
+                        if m.row as usize >= self.view_height() {
+                            return false; // status bar
+                        }
+                        let pos = self.pos_at(m.row, m.column);
+                        self.selection = Some(Selection {
+                            anchor: pos,
+                            cursor: pos,
+                            dragging: true,
+                        });
+                        *repaint = true;
+                    }
+                    MouseEventKind::Drag(MouseButton::Left) => {
+                        let pos = self.pos_at(m.row, m.column);
+                        if let Some(sel) = &mut self.selection {
+                            if sel.cursor != pos {
+                                sel.cursor = pos;
+                                *repaint = true;
+                            }
+                        }
+                    }
+                    MouseEventKind::Up(MouseButton::Left) => {
+                        if let Some(mut sel) = self.selection {
+                            if sel.dragging {
+                                sel.dragging = false;
+                                if sel.is_empty() {
+                                    self.selection = None;
+                                } else {
+                                    self.selection = Some(sel);
+                                    // Releasing the drag is the copy gesture;
+                                    // `y` copies again after scrolling.
+                                    self.copy_selection();
+                                }
+                                *repaint = true;
+                            } else {
+                                self.selection = Some(sel);
+                            }
+                        }
+                    }
                     _ => {}
                 }
                 false
@@ -407,6 +506,7 @@ impl App {
                 self.cell = PixelCell { w: cw, h: ch };
                 self.settle_until = Some(Instant::now() + SETTLE);
                 self.cell_dirty = true;
+                self.selection = None;
                 *relayout = true;
                 false
             }
@@ -418,8 +518,16 @@ impl App {
         let page = self.view_height() as isize;
         let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
         match k.code {
+            KeyCode::Esc if self.selection.is_some() => {
+                self.selection = None;
+                *repaint = true;
+            }
             KeyCode::Char('q') | KeyCode::Esc => return true,
             KeyCode::Char('c') if ctrl => return true,
+            KeyCode::Char('y') => {
+                self.copy_selection();
+                *repaint = true;
+            }
             KeyCode::Char('j') | KeyCode::Down | KeyCode::Enter => self.scroll(1, repaint),
             KeyCode::Char('k') | KeyCode::Up => self.scroll(-1, repaint),
             KeyCode::Char('d') => self.scroll(page / 2, repaint),
@@ -458,6 +566,57 @@ impl App {
         self.follow = self.top == max && by > 0;
     }
 
+    // ---- selection ----
+
+    /// Map a mouse cell to a document position. The gutter is not selectable
+    /// and positions past the text column clamp to the content width.
+    fn pos_at(&self, screen_row: u16, screen_col: u16) -> Pos {
+        let screen_row = (screen_row as usize).min(self.view_height().saturating_sub(1));
+        let row = (self.top + screen_row).min(self.layout.len().saturating_sub(1));
+        let col = (screen_col as usize)
+            .saturating_sub(GUTTER)
+            .min(self.content_width());
+        Pos { row, col }
+    }
+
+    fn selection_text(&self) -> Option<String> {
+        let sel = self.selection?;
+        if sel.is_empty() {
+            return None;
+        }
+        let (a, b) = sel.ordered();
+        let width = self.content_width();
+        let mut lines = Vec::new();
+        for row in a.row..=b.row {
+            let Some((from, to)) = sel.range_on(row, width) else {
+                continue;
+            };
+            let text = match self.layout.get(row) {
+                Some(Row::Text(line)) => text_between(line, from, to),
+                // Images and placeholders contribute no text.
+                _ => String::new(),
+            };
+            lines.push(text.trim_end().to_string());
+        }
+        while lines.last().is_some_and(|l| l.is_empty()) {
+            lines.pop();
+        }
+        if lines.is_empty() {
+            return None;
+        }
+        Some(lines.join("\n"))
+    }
+
+    fn copy_selection(&mut self) {
+        let Some(text) = self.selection_text() else {
+            return;
+        };
+        clipboard::copy(&text, &mut self.out);
+        let chars = text.chars().count();
+        self.message = Some(format!("copied {chars} chars"));
+        self.message_until = Some(Instant::now() + Duration::from_millis(2000));
+    }
+
     fn jump_heading(&mut self, forward: bool, repaint: &mut bool) {
         let heads: Vec<usize> = self
             .doc
@@ -486,12 +645,14 @@ impl App {
             Ok(s) => s,
             Err(e) => {
                 self.message = Some(format!("can't read: {e}"));
+                self.message_until = None;
                 self.edit_started = None;
                 let _ = self.paint(screen);
                 return;
             }
         };
         self.message = None;
+        self.message_until = None;
         let hash = xxh3_64(src.as_bytes());
         if self.src_hash == Some(hash) {
             self.edit_started = None;
@@ -527,6 +688,7 @@ impl App {
             })
             .unwrap_or(anchor_block.min(new.blocks.len().saturating_sub(1)));
         self.doc = new;
+        self.selection = None;
         self.relayout(screen);
         self.restore_anchor(new_anchor, offset);
         if at_bottom {
@@ -973,7 +1135,10 @@ impl App {
                     },
                 );
             }
-            Err(e) => self.message = Some(format!("render failed: {e}")),
+            Err(e) => {
+                self.message = Some(format!("render failed: {e}"));
+                self.message_until = None;
+            }
         }
         true
     }
@@ -1071,6 +1236,8 @@ impl App {
         let h = self.view_height();
         self.top = self.top.min(self.max_top());
         let width = self.content_width();
+        let selection = self.selection;
+        let sel_bg = Theme::mix(self.theme.bg, self.theme.accent(), 0.30);
         let now = Instant::now();
         let mut rows = Vec::with_capacity(h);
         for y in 0..h {
@@ -1098,7 +1265,13 @@ impl App {
                     s.push_str("  ");
                 }
                 match row {
-                    Row::Text(line) => line.encode_into(&mut s, width),
+                    Row::Text(line) => {
+                        match selection.and_then(|s| s.range_on(self.top + y, width)) {
+                            Some((from, to)) => selection_line(line, from, to, width, sel_bg)
+                                .encode_into(&mut s, width),
+                            None => line.encode_into(&mut s, width),
+                        }
+                    }
                     Row::Image { id, row, cols } => {
                         s.push_str(&kgp::placeholder_row(*id, *row, *cols))
                     }
@@ -1171,6 +1344,77 @@ enum Kind {
     Text,
 }
 
+/// Text in display columns `[from, to)` of `line`.
+fn text_between(line: &Line, from: usize, to: usize) -> String {
+    let mut out = String::new();
+    let mut col = 0usize;
+    for cell in &line.cells {
+        for ch in cell.text.chars() {
+            let start = col;
+            col += docmodel::char_cols(ch);
+            if start >= from && start < to {
+                out.push(ch);
+            }
+        }
+    }
+    out
+}
+
+/// `line` with display columns `[from, to)` painted in `bg`. Trailing blank
+/// cells inside the range are included so multi-line selections read as one
+/// block instead of ragged text lines.
+fn selection_line(line: &Line, from: usize, to: usize, width: usize, bg: Rgb) -> Line {
+    let mut cells: Vec<Cell> = Vec::new();
+    let mut col = 0usize;
+    for cell in &line.cells {
+        let mut part = String::new();
+        let mut part_sel = false;
+        for ch in cell.text.chars() {
+            let width = docmodel::char_cols(ch);
+            let sel = col >= from && col < to;
+            if part.is_empty() {
+                part_sel = sel;
+            } else if sel != part_sel {
+                cells.push(tinted(std::mem::take(&mut part), cell, part_sel, bg));
+                part_sel = sel;
+            }
+            part.push(ch);
+            col += width;
+        }
+        if !part.is_empty() {
+            cells.push(tinted(part, cell, part_sel, bg));
+        }
+    }
+    let pad_end = to.min(width);
+    let pad_start = col.max(from);
+    if pad_end > pad_start {
+        cells.push(Cell {
+            text: " ".repeat(pad_end - pad_start),
+            attrs: Attrs {
+                bg: Some(bg),
+                ..Default::default()
+            },
+            url: None,
+        });
+    }
+    Line {
+        cells,
+        fill: line.fill,
+    }
+}
+
+fn tinted(text: String, cell: &Cell, selected: bool, bg: Rgb) -> Cell {
+    let mut attrs = cell.attrs;
+    if selected {
+        attrs.bg = Some(bg);
+    }
+    Cell {
+        text,
+        attrs,
+        url: cell.url.clone(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1182,5 +1426,57 @@ mod tests {
         let s = "![x](a.png)";
         let d = doc::parse(s);
         assert!(matches!(&d.blocks[0].node, doc::Node::Image { url } if url == "a.png"));
+    }
+
+    fn line(text: &str) -> Line {
+        let mut l = Line::default();
+        l.cells.push(Cell::new(text, Attrs::default()));
+        l
+    }
+
+    #[test]
+    fn selection_range_includes_cursor_cell_and_clamps() {
+        let sel = Selection {
+            anchor: Pos { row: 2, col: 3 },
+            cursor: Pos { row: 2, col: 5 },
+            dragging: false,
+        };
+        assert_eq!(sel.range_on(2, 80), Some((3, 6)));
+        assert_eq!(sel.range_on(1, 80), None);
+        let sel = Selection {
+            anchor: Pos { row: 1, col: 0 },
+            cursor: Pos { row: 3, col: 200 },
+            dragging: false,
+        };
+        assert_eq!(sel.range_on(2, 40), Some((0, 40)));
+        assert_eq!(sel.range_on(3, 40), Some((0, 40)));
+    }
+
+    #[test]
+    fn selection_text_clips_display_columns() {
+        let l = line("ab中文cd");
+        // Columns: a0 b1 中2-3 文4-5 c6 d7
+        assert_eq!(text_between(&l, 1, 4), "b中");
+        assert_eq!(text_between(&l, 2, 5), "中文");
+        assert_eq!(text_between(&l, 6, 20), "cd");
+    }
+
+    #[test]
+    fn selection_line_tints_only_selected_columns() {
+        let bg = Rgb(10, 20, 30);
+        let out = selection_line(&line("abcd"), 1, 3, 80, bg);
+        let texts: Vec<&str> = out.cells.iter().map(|c| c.text.as_str()).collect();
+        assert_eq!(texts, vec!["a", "bc", "d"]);
+        assert_eq!(out.cells[1].attrs.bg, Some(bg));
+        assert_eq!(out.cells[0].attrs.bg, None);
+    }
+
+    #[test]
+    fn selection_line_pads_blank_cells_to_the_cursor() {
+        let bg = Rgb(10, 20, 30);
+        let out = selection_line(&line("ab"), 0, 6, 80, bg);
+        assert_eq!(out.width(), 6);
+        assert_eq!(out.cells.last().unwrap().text, "    ");
+        assert_eq!(out.cells.last().unwrap().attrs.bg, Some(bg));
     }
 }
