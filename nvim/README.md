@@ -10,19 +10,41 @@ Rex terminal).
 
 ## Install
 
+This plugin ships inside the docp repository, under `nvim/`, and talks to the
+`docp` binary. Source of truth:
+<https://github.com/SixinVang/kitty-doc-preview>
+
+```sh
+git clone https://github.com/SixinVang/kitty-doc-preview
+cd kitty-doc-preview
+cargo build --release
+ln -sf "$PWD/target/release/docp" ~/.local/bin/docp   # or: cargo install --path crates/docp
+```
+
+With lazy.nvim, add the repo and put its `nvim/` directory on `runtimepath`:
+
 ```lua
--- lazy.nvim
 {
-  dir = "~/workspace/kitty-doc-preview/nvim",
-  config = function()
+  "SixinVang/kitty-doc-preview",
+  name = "docp",
+  lazy = false, -- config() adds nvim/ to 'runtimepath'
+  config = function(plugin)
+    vim.opt.rtp:append(plugin.dir .. "/nvim")
     require("docp").setup({ docp_bin = "docp" })
   end,
 }
 ```
 
-Or add the directory to `runtimepath` before plugins load. `docp` must be
-built (`cargo build --release`) and either on `PATH` or given as an absolute
-path in `docp_bin`.
+Without a plugin manager, add `nvim/` from the clone to `runtimepath` before
+plugins load:
+
+```lua
+vim.opt.rtp:append(vim.fn.expand("~/src/kitty-doc-preview/nvim"))
+require("docp").setup({ docp_bin = "docp" })
+```
+
+`docp` must be built (`cargo build --release`) and either on `PATH` or given as
+an absolute path in `docp_bin`.
 
 ## Commands
 

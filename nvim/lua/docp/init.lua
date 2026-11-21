@@ -26,6 +26,32 @@ local config = vim.deepcopy(defaults)
 --- bufnr -> session table
 local sessions = {}
 
+local bootstrapped = false
+
+--- Define the user commands and the exit hook. Idempotent, so it works both
+--- from plugin/docp.lua (plugin managers that scan plugin/) and from
+--- `require("docp").setup()` (plugin managers that only add the repo root).
+function M.bootstrap()
+  if bootstrapped then
+    return
+  end
+  bootstrapped = true
+  vim.api.nvim_create_user_command("DocpPreview", function()
+    M.open()
+  end, { desc = "Open a docp preview pane synced with this buffer" })
+  vim.api.nvim_create_user_command("DocpClose", function()
+    M.close()
+  end, { desc = "Close this buffer's docp preview pane" })
+  vim.api.nvim_create_user_command("DocpToggle", function()
+    M.toggle()
+  end, { desc = "Toggle this buffer's docp preview pane" })
+  vim.api.nvim_create_autocmd("VimLeavePre", {
+    callback = function()
+      M.close_all()
+    end,
+  })
+end
+
 local function now_ms()
   return uv.hrtime() / 1e6
 end
@@ -251,6 +277,7 @@ end
 
 function M.setup(opts)
   config = vim.tbl_deep_extend("force", defaults, opts or {})
+  M.bootstrap()
 end
 
 function M.open(buf)

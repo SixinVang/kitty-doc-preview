@@ -5,9 +5,13 @@ Preview PDFs, images and Markdown in terminals that speak the
 Built for macOS + [Rex](https://github.com/tfcace/rex), zero external
 dependencies (no Node, no browser, no poppler).
 
+Source: <https://github.com/SixinVang/kitty-doc-preview>
+
 Status: **M3a** — images + Markdown (live preview, Neovim scroll sync) + PDF (paged, zoom, reload).
 
 ```sh
+git clone https://github.com/SixinVang/kitty-doc-preview
+cd kitty-doc-preview
 cargo build --release
 
 docp image.png              # image viewer
@@ -84,14 +88,41 @@ and in the status bar.
 ## Neovim + Rex: synced preview
 
 Edit Markdown in Neovim with a live docp pane beside it; scrolling in either
-pane follows the other. The plugin lives in [`nvim/`](nvim/) and currently
-requires [Rex](https://github.com/tfcace/rex) (the pane is opened with
-`rex split`).
+pane follows the other. The plugin lives in [`nvim/`](nvim/) of this repository
+and currently requires [Rex](https://github.com/tfcace/rex) (the pane is opened
+with `rex split`).
+
+Build the binary first and put it on `PATH` (or pass its absolute path as
+`docp_bin`):
+
+```sh
+git clone https://github.com/SixinVang/kitty-doc-preview
+cd kitty-doc-preview
+cargo build --release
+ln -sf "$PWD/target/release/docp" ~/.local/bin/docp   # or: cargo install --path crates/docp
+```
+
+Then install the plugin. With lazy.nvim the Neovim files are in the repo's
+`nvim/` subdirectory, so point `runtimepath` at it from `config`:
 
 ```lua
--- lazy.nvim, or add ~/workspace/kitty-doc-preview/nvim to 'runtimepath'
-{ dir = "~/workspace/kitty-doc-preview/nvim",
-  config = function() require("docp").setup({ docp_bin = "docp" }) end }
+{
+  "SixinVang/kitty-doc-preview",
+  name = "docp",
+  lazy = false, -- config() adds nvim/ to 'runtimepath'
+  config = function(plugin)
+    vim.opt.rtp:append(plugin.dir .. "/nvim")
+    require("docp").setup({ docp_bin = "docp" })
+  end,
+}
+```
+
+Without a plugin manager, clone the repo and add its `nvim/` directory to
+`runtimepath` before plugins load:
+
+```lua
+vim.opt.rtp:append(vim.fn.expand("~/src/kitty-doc-preview/nvim"))
+require("docp").setup({ docp_bin = "docp" })
 ```
 
 Then, in a Markdown buffer inside a Rex pane:
