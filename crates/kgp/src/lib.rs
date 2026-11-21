@@ -120,17 +120,28 @@ pub fn placeholder_row(id: u32, row: u16, cols: u16) -> String {
     s
 }
 
-/// Probe sequence: cell size (CSI 16t), graphics support, Unicode
-/// placeholder feature query, terminated by DA1 (CSI c) so the reader knows
-/// when to stop. See <https://sw.kovidgoyal.net/kitty/graphics-protocol/>
-pub fn probe_queries() -> Vec<u8> {
+/// Probe sequence body: cell size (CSI 16t), graphics support, Unicode
+/// placeholder feature query. Without the DA1 terminator; callers composing
+/// a full startup probe append `DA1` last so the reader knows when the
+/// terminal is done replying.
+pub fn probe_body() -> Vec<u8> {
     let mut v = Vec::new();
     v.extend_from_slice(b"\x1b[16t");
     v.extend_from_slice(b"\x1b_Gi=31,s=1,v=1,a=q,t=d,f=24;AAAA\x1b\\");
     // feature query for Unicode placeholders; some terminals (Rex) require
     // transmission keys (dims/format) even for query actions
     v.extend_from_slice(b"\x1b_Ga=q,i=32,e=T,U=1,t=d,f=24,s=1,v=1;AAAA\x1b\\");
-    v.extend_from_slice(b"\x1b[c");
+    v
+}
+
+/// Primary Device Attributes; terminals answer this last, so it terminates
+/// a probe batch.
+pub const DA1: &[u8] = b"\x1b[c";
+
+/// The stock probe: body + DA1.
+pub fn probe_queries() -> Vec<u8> {
+    let mut v = probe_body();
+    v.extend_from_slice(DA1);
     v
 }
 
@@ -340,10 +351,7 @@ mod tests {
     #[test]
     fn parse_feature_plain_ok_is_inconclusive() {
         // Rex accepts the query (with dims) but does not echo feature keys
-        let p = parse_probe(
-            b"\x1b_Gi=31;OK\x1b\\\x1b_Gi=32;OK\x1b\\\x1b[?62c",
-            None,
-        );
+        let p = parse_probe(b"\x1b_Gi=31;OK\x1b\\\x1b_Gi=32;OK\x1b\\\x1b[?62c", None);
         assert!(p.graphics);
         assert_eq!(p.placeholders, None);
     }

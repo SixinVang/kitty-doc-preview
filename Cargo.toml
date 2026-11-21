@@ -5,6 +5,7 @@ members = [
     "crates/termui",
     "crates/docmodel",
     "crates/render-img",
+    "crates/render-md",
     "crates/docp",
 ]
 
@@ -16,10 +17,21 @@ license = "AGPL-3.0-or-later"
 [workspace.dependencies]
 anyhow = "1"
 base64 = "0.22"
-clap = { version = "4", features = ["derive"] }
+clap = { version = "4", features = ["derive", "env"] }
+crossbeam-channel = "0.5"
 crossterm = "0.29"
 image = { version = "0.25", features = ["rayon"] }
 libc = "0.2"
+notify = "8"
+png = "0.17"
+pulldown-cmark = { version = "0.13", default-features = false }
+rayon = "1"
+resvg = { version = "0.45", default-features = false, features = ["text", "system-fonts", "memmap-fonts"] }
+rquickjs = "0.9"
+syntect = { version = "5", default-features = false, features = ["default-fancy"] }
+ttf-parser = "0.25"
+unicode-width = "0.2"
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
 
 [profile.release]
 lto = "thin"

@@ -1,8 +1,12 @@
-mod app;
 mod caps;
+mod cat;
+mod imgview;
+mod mdview;
+mod screen;
 
 use anyhow::{bail, Context, Result};
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
+use docmodel::Theme;
 use std::io::IsTerminal;
 use std::path::PathBuf;
 
@@ -13,13 +17,27 @@ use std::path::PathBuf;
     about = "Preview PDFs, images and Markdown in kitty-graphics terminals (Rex)"
 )]
 struct Cli {
-    /// File to preview (image formats in M0)
+    /// File to preview
     file: Option<PathBuf>,
+    /// Color theme
+    #[arg(long, value_enum, env = "DOCP_THEME", default_value_t = ThemeChoice::Terminal)]
+    theme: ThemeChoice,
     /// Print detected terminal capabilities and exit
     #[arg(short, long)]
     info: bool,
+    /// Render to stdout instead of the alternate screen (no interactivity)
+    #[arg(long)]
+    cat: bool,
     #[command(subcommand)]
     command: Option<Command>,
+}
+
+#[derive(Copy, Clone, PartialEq, Eq, ValueEnum)]
+enum ThemeChoice {
+    /// Use the terminal's own colors (queried at startup)
+    Terminal,
+    Dark,
+    Light,
 }
 
 #[derive(Subcommand)]
@@ -48,28 +66,33 @@ fn main() -> Result<()> {
     let Some(file) = cli.file else {
         bail!("no file given; try `docp image.png`, `docp --info` or `docp gen-test out.png`")
     };
-    if !caps::is_image(&file) {
-        bail!(
-            "unsupported file type (M0 supports images): {}",
-            file.display()
-        );
+    if !file.exists() {
+        bail!("no such file: {}", file.display());
     }
-    if !caps.graphics || !caps.placeholders {
-        bail!(
-            "terminal lacks kitty graphics protocol support \
-             (graphics={}, placeholders={}); plain-text fallback lands in M4",
-            caps.graphics,
-            caps.placeholders
-        );
+
+    let theme = match cli.theme {
+        ThemeChoice::Terminal => caps.terminal_theme.clone(),
+        ThemeChoice::Dark => Theme::dark_default(),
+        ThemeChoice::Light => Theme::light_default(),
+    };
+
+    let kind = caps::kind(&file);
+    if cli.cat || !std::io::stdout().is_terminal() {
+        return cat::run(&file, kind, &caps, &theme);
     }
-    if !std::io::stdout().is_terminal() {
-        bail!("stdout is not a terminal; cat mode lands in M4");
+    if !caps.graphics {
+        bail!("terminal does not support the kitty graphics protocol");
     }
-    app::run(&file, caps)
+
+    match kind {
+        caps::Kind::Image => imgview::run(&file, caps),
+        caps::Kind::Markdown => mdview::run(&file, caps, theme),
+        caps::Kind::Pdf => bail!("PDF support lands in M2; not wired yet"),
+    }
 }
 
 fn gen_test(path: &std::path::Path, tall: bool) -> Result<()> {
-    let (w, h) = if tall { (900u32, 4600u32) } else { (1280, 800) };
+    let (w, h) = if tall { (600u32, 9000u32) } else { (1280, 800) };
     let mut img = image::RgbaImage::new(w, h);
     for y in 0..h {
         for x in 0..w {

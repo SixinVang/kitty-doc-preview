@@ -1,6 +1,9 @@
 [package]
 name = "docmodel"
-description = "Shared display model: styled text lines and image placeholder rows"
+description = "Shared display model: styled text lines, image placeholder rows, theme"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+
+[dependencies]
+unicode-width = { workspace = true }

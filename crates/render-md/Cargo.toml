@@ -1,0 +1,22 @@
+[package]
+name = "render-md"
+description = "Markdown hybrid rendering: text layout, syntax highlight, big-type headings, Mermaid"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+syntaxes = ["dep:syntect"]
+
+[dependencies]
+docmodel = { path = "../docmodel" }
+kgp = { path = "../kgp" }
+pulldown-cmark = { workspace = true }
+resvg = { workspace = true }
+rquickjs = { workspace = true }
+syntect = { workspace = true, optional = true }
+ttf-parser = { workspace = true }
+unicode-width = { workspace = true }
+xxhash-rust = { workspace = true }
+crossbeam-channel = { workspace = true }
+png = { workspace = true }
