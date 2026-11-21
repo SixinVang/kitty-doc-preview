@@ -3,6 +3,7 @@ mod cat;
 mod config;
 mod imgview;
 mod mdview;
+mod pagedview;
 mod screen;
 
 use anyhow::{bail, Context, Result};
@@ -48,6 +49,9 @@ struct Cli {
     /// Render to stdout instead of the alternate screen (no interactivity)
     #[arg(long)]
     cat: bool,
+    /// PDF page to start on (1-based)
+    #[arg(long, value_name = "N")]
+    page: Option<usize>,
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -114,7 +118,7 @@ fn main() -> Result<()> {
     match kind {
         caps::Kind::Image => imgview::run(&file, caps),
         caps::Kind::Markdown => mdview::run(&file, caps, theme, config.layout.max_width),
-        caps::Kind::Pdf => bail!("PDF support lands in M2; not wired yet"),
+        caps::Kind::Pdf => pagedview::run(&file, caps, theme, cli.page),
     }
 }
 

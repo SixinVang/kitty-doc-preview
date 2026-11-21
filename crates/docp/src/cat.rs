@@ -14,7 +14,7 @@ pub fn run(file: &Path, kind: Kind, caps: &Caps, theme: &Theme, max_width: usize
     match kind {
         Kind::Markdown => markdown(file, caps, theme, max_width),
         Kind::Image => image(file, caps),
-        Kind::Pdf => anyhow::bail!("pdf in cat mode lands in M2"),
+        Kind::Pdf => anyhow::bail!("pdf text output needs the text layer (M3)"),
     }
 }
 

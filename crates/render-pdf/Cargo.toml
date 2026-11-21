@@ -1,0 +1,12 @@
+[package]
+name = "render-pdf"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow = { workspace = true }
+image = { workspace = true }
+# MuPDF's default features enable its bundled MuJS, whose js_* symbols collide
+# with rquickjs (the Mermaid engine) and crash it. PDF needs neither.
+mupdf = { version = "0.8", default-features = false, features = ["base14-fonts"] }

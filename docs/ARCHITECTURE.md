@@ -147,7 +147,7 @@ view.compute_visible(scroll, size)
 
 PNG/JPEG/WebP/GIF/BMP/TIFF + SVG（resvg）。
 - 解码 → 按视口宽度缩放（物理像素，cell 整数倍画布）→ PNG 编码（flate2/zlib）→ media
-- GIF/WebP 动图：M2+ 用 `a=f` 帧协议做终端驱动播放（协议原生支持 gap 与循环，客户端不用留活）
+- GIF/WebP 动图：M3 用 `a=f` 帧协议做终端驱动播放（协议原生支持 gap 与循环，客户端不用留活）
 - 单图 = 一页 PagedView；EXIF 方向修正；超大图 tile 化
 
 ### 5.2 render-md（混合渲染）
@@ -178,10 +178,18 @@ trait PdfBackend {          // 抽象留给未来 pdfium 备胎，先只写 mupd
 }
 ```
 
-**视口分块光栅化**（性能核心）：
+**视口分块光栅化**（性能核心，M2 已实现）：
 - 页宽 = 视口 cell 宽 → 物理像素宽；缩放 = 像素宽/页宽 pt（fit-width 默认，`z/Z` 缩放倍率）
 - 只光栅化**可见矩形 ± 半屏预取**，输出 ≤280 行的 tile；缓存键 `(page, zoom, tile_idx, px_w)`
+- 实现：`render-pdf` 只暴露 `render_band(page, scale, x0, y0, w, h)`，用 draw device 的
+  pixmap 边界裁剪，不整页光栅化；tile 高 64 行，LRU 32 项并设 48M 像素预算，跨页 ±1 预取。
+  实测 2170×2048 px tile（含 PNG 编码）约 10–15 ms。`z/Z` 改变 scale 后按
+  x 中心锚定，水平用 `h/l` 平移（不放大旧位图）。
 - mupdf `Document` 非 Sync：**单一渲染线程持有文档**，主线程投递 job（channel），结果带 media id 回主线程。text/outline 提取在同线程做首次缓存。实测单 tile 10–20ms，足够；不够再开多文档副本分片
+- **依赖坑**：`mupdf` crate 默认开 `js` feature，会把 MuPDF 自带 MuJS 编进来；
+  它与 Mermaid 用的 rquickjs 同名 `js_malloc/js_free/...` 冲突，链出来的
+  Mermaid 路径直接 bus error。`render-pdf` 必须
+  `mupdf = { version = "0.8", default-features = false, features = ["base14-fonts"] }`。
 - 相邻页 ±1 低优先级预取（rayon 不适用于 mupdf，用自建小线程池）
 
 **文本层**：
@@ -210,7 +218,7 @@ trait PdfBackend {          // 抽象留给未来 pdfium 备胎，先只写 mupd
 | 缓存 | 键 | 容量 | 淘汰 |
 |---|---|---|---|
 | md 媒体 | xxhash(内容+主题+尺寸) | ~64 项 | LRU，删除终端侧数据 |
-| PDF tile | (page, zoom, tile, px_w) | ~32 tile | LRU + 滚出即降级预取 |
+| PDF tile | (gen, page, tile, px_w, cell_h, x) | 32 tile / 48M px | LRU（可见 tile 不淘汰），删除终端侧数据 |
 | PDF 文本层 | page | 全书（纯文本很小） | 不淘汰 |
 | 终端侧图片 | image id | kitty 配额内 | 主动 a=d |
 
@@ -222,6 +230,7 @@ trait PdfBackend {          // 抽象留给未来 pdfium 备胎，先只写 mupd
 j/k ↑↓ 滚动          space/b 翻页/半页       d/u 半页
 g/G 首/尾(G=跟随尾)   [/]  md:上/下标题  pdf:上/下页
 n/p  pdf:下/上一页    1-9  跳到 10%..90%    z/Z 缩放(pdf)
+h/l  pdf:水平平移(缩放后)
 /   搜索   n/N 次匹配  t  目录(pdf)         o  打开链接
 y   复制选择(OSC52)    r  强制重载           ctrl-r 重绘
 +/-  md: 内容宽度      q  退出               ?  帮助浮层
@@ -231,7 +240,7 @@ y   复制选择(OSC52)    r  强制重载           ctrl-r 重绘
 ## 9. watch / 跟随
 
 - **markdown**：notify(debounce 15ms) → 重解析 → 块哈希 diff → 仅变化的媒体重光栅；滚动锚定（上方行数不变则不动），`G` 开启 tail 跟随
-- **PDF**：inode/mtime 变化（latex 重编译）→ 后台重开文档 → 保持 `页码+页内偏移`（页数变化则夹紧）→ 无感刷新
+- **PDF**：inode/mtime 变化（latex 重编译）→ 后台重开文档 → 保持 `页码+页高比例`（页数变化则夹紧，缩放和水平位置不变）→ 无感刷新；实现见 `pagedview.rs`，`gen` 世代号丢弃旧文档的在途 tile
 - **图片**：同 md 锚定策略
 
 ## 10. 降级链与 CLI
@@ -263,8 +272,9 @@ docp bench <file>           # headless 计时
 | 风险 | 缓解 |
 |---|---|
 | Rex 对 `t=f` 文件传输、`a=f` 动画帧支持未知 | 启动特性探测，全部有 `t=d`/无动画 fallback |
-| mupdf 单线程渲染成为瓶颈 | 先测；必要时多 Document 实例分片 |
-| 大页深缩放 tile 数量爆炸 | tile 高度自适应（280 行上限内尽量大块） |
+| mupdf 单线程渲染成为瓶颈 | 先测（2170×2048 tile 10–15 ms，够用）；必要时多 Document 实例分片 |
+| mupdf 自带 MuJS 与 rquickjs 符号冲突 | 关闭 `mupdf` 默认 feature（`js`），见 §5.3；Mermaid 回归验证 |
+| 大页深缩放 tile 数量爆炸 | 固定 64 行 tile + 像素预算淘汰；只光栅化可见矩形 |
 | CJK 在 SGR 文本路径的宽度歧义（emoji/组合字） | unicode-width + 实测校正表；文本路径可复制优先于完美对齐 |
 | mupdf-sys 构建慢（首次 ~2min） | 接受；CI 缓存 |
 
@@ -272,6 +282,7 @@ docp bench <file>           # headless 计时
 
 - **M0 spike**（先跑通 Rex）：workspace + kgp + termui + render-img 单图显示；验证 t=f 探测
 - **M1**：render-md 全量（tkmp 迁移 + syntect + 表格 CJK）+ watch + cat 模式
-- **M2**：render-pdf：fit-width 视口 tile + 翻页 + 预取 + z/Z；图片动图
-- **M3**：PDF 文本层：搜索/高亮/链接/大纲/OSC52 选择；pdf watch
+- **M2**（已完成）：render-pdf：fit-width 视口 tile + 翻页 + 预取 + z/Z + 水平平移；
+  watch 重开；`--page`（图片动图顺延到 M3）
+- **M3**：PDF 文本层：搜索/高亮/链接/大纲/OSC52 选择
 - **M4**：纯文本降级打磨、bench、发布（cargo-brew / install.sh）

@@ -26,4 +26,5 @@ docmodel = { path = "../docmodel" }
 kgp = { path = "../kgp" }
 render-img = { path = "../render-img" }
 render-md = { path = "../render-md", features = ["syntaxes"] }
+render-pdf = { path = "../render-pdf" }
 termui = { path = "../termui" }

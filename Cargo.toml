@@ -6,6 +6,7 @@ members = [
     "crates/docmodel",
     "crates/render-img",
     "crates/render-md",
+    "crates/render-pdf",
     "crates/docp",
 ]
 

@@ -5,13 +5,15 @@ Preview PDFs, images and Markdown in terminals that speak the
 Built for macOS + [Rex](https://github.com/tfcace/rex), zero external
 dependencies (no Node, no browser, no poppler).
 
-Status: **M1** — images + Markdown (live preview). PDF lands in M2.
+Status: **M2** — images + Markdown (live preview) + PDF (paged, zoom, reload).
 
 ```sh
 cargo build --release
 
 docp image.png              # image viewer
 docp notes.md               # markdown, re-renders on save
+docp paper.pdf              # PDF, fit-width, n/p pages, z/Z zoom
+docp --page 12 paper.pdf    # start on page 12
 docp --theme light notes.md # terminal (default) | dark | light
 docp --cat notes.md         # plain styled output, no alt screen
 docp --info                 # print detected capabilities and config
@@ -45,6 +47,10 @@ Keys: `j/k` scroll · `space/b` page · `d/u` half page · `g/G` top/bottom
 (`G` also follows the file) · `]`/`[` next/previous heading · `r` redraw ·
 `q` quit · mouse wheel.
 
+PDF adds: `n/p` (or `]`/`[`) next/previous page · `1`–`9` jump to 10 %…90 % ·
+`z`/`Z` zoom in/out (re-rasterised, never upscaled) · `h/l` pan when zoomed ·
+`r` reopen. Page number sits in the left gutter and in the status bar.
+
 ## What it does
 
 - **Hybrid Markdown rendering.** Body text, lists, quotes, tables, links and
@@ -55,7 +61,13 @@ Keys: `j/k` scroll · `space/b` page · `d/u` half page · `g/G` top/bottom
   placeholders, so scrolling, redraws and resizes cost zero image traffic;
   a resize rescales in the terminal immediately and re-rasterizes after 80 ms.
 - **Live preview.** Saving the file re-renders only changed blocks, keeps your
-  scroll anchor, and follows the end when you are at the bottom.
+  scroll anchor, and follows the end when you are at the bottom. PDFs reopen in
+  place, keeping the page and the scroll offset inside it.
+- **PDF is vector, tiled to the viewport.** Fit-width layout is pure geometry;
+  only the visible rectangle (± prefetch) is rasterised by MuPDF on a dedicated
+  thread, sliced into ≤64-row tiles and cached in the terminal. Zooming
+  re-rasterises at the new scale and pans horizontally instead of stretching
+  pixels.
 - **Colors from your terminal.** The `terminal` theme asks Rex for its
   foreground, background and 16-color palette at startup; `dark`/`light` are
   built-in overrides.
@@ -74,9 +86,10 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). Crates:
 | `docmodel` | `Row`/`Line`/`Cell` display model, SGR/OSC8 encoding, theme |
 | `render-img` | decode, viewport scale, cell-grid canvas, PNG tiles |
 | `render-md` | markdown blocks, text layout, syntect, big-type headings, Mermaid |
-| `docp` | CLI, screen painter, image view, markdown view, cat mode |
+| `render-pdf` | MuPDF open/page geometry, clipped band rasterisation |
+| `docp` | CLI, screen painter, image view, markdown view, PDF view, cat mode |
 
 ## License
 
-AGPL-3.0-or-later (links MuPDF for the upcoming PDF backend).
+AGPL-3.0-or-later (links MuPDF, itself AGPL, for the PDF backend).
 Embedded assets: Inter and JetBrains Mono (SIL OFL), Pele (MIT).
