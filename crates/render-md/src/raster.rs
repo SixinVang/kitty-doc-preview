@@ -163,6 +163,7 @@ fn draw(
     let opts = usvg::Options {
         fontdb,
         font_family: fonts::sans_family().into(),
+        font_resolver: fonts::font_resolver(),
         ..Default::default()
     };
     let tree = usvg::Tree::from_str(svg, &opts).map_err(|e| e.to_string())?;
@@ -250,6 +251,29 @@ mod tests {
         assert!(h.cols <= 40, "{} cols", h.cols);
         let r = heading(&h, Rgb(0, 0, 0), CELL).unwrap();
         assert_eq!(r.rows, 3);
+    }
+
+    #[test]
+    fn heading_draws_emoji_in_color() {
+        // Emoji need three things to look right: a fallback font that is not
+        // `.LastResort` (tofu), resvg's raster-image support (color bitmap
+        // glyphs), and a system font to begin with.
+        let h = layout_heading("🐳 Podman", 2, CELL, 40);
+        let r = heading(&h, Rgb(0, 0, 0), CELL).unwrap();
+        let mut reader = png::Decoder::new(std::io::Cursor::new(&r.png))
+            .read_info()
+            .unwrap();
+        let mut buf = vec![0; reader.output_buffer_size()];
+        reader.next_frame(&mut buf).unwrap();
+        let rgba = reader.info().color_type == png::ColorType::Rgba;
+        assert!(rgba);
+        let colored = buf
+            .chunks_exact(4)
+            .any(|p| p[3] != 0 && !(p[0] == p[1] && p[1] == p[2]));
+        assert!(
+            colored,
+            "emoji should be drawn in color, not as placeholder text"
+        );
     }
 
     #[test]

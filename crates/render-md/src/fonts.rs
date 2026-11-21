@@ -5,7 +5,7 @@
 //! agrees with what resvg later draws. Configuration must happen before the
 //! first use; the CLI calls `configure` right after parsing arguments.
 
-use resvg::usvg::fontdb;
+use resvg::usvg::{self, fontdb};
 use std::path::Path;
 use std::sync::{Arc, LazyLock, OnceLock};
 use ttf_parser::Face;
@@ -252,6 +252,73 @@ pub fn with_system() -> Arc<fontdb::Database> {
             Arc::new(db)
         })
         .clone()
+}
+
+/// Font resolver for resvg.
+///
+/// The default fallback selector walks `fontdb` in load order, and on macOS
+/// the first face that claims to support every character is often
+/// `.LastResort` (or another dot-prefixed private face): it maps all of
+/// Unicode to a "tofu" glyph, so emoji and other missing characters render as
+/// boxes with a question mark. Skip those faces, and steer emoji toward an
+/// emoji font so color glyphs are drawn instead of whatever came first.
+pub fn font_resolver() -> usvg::FontResolver<'static> {
+    usvg::FontResolver {
+        select_font: usvg::FontResolver::default_font_selector(),
+        select_fallback: Box::new(|c, used, db| {
+            let base = db.face(*used.first()?)?;
+            let mut best: Option<(u32, fontdb::ID)> = None;
+            for face in db.faces() {
+                if used.contains(&face.id) || is_private(face) || !has_char(db, face.id, c) {
+                    continue;
+                }
+                let mut score = 0u32;
+                let emoji_face = face.families.iter().any(|(f, _)| f.contains("Emoji"));
+                if is_emoji(c) {
+                    score += if emoji_face { 0 } else { 100 };
+                } else if emoji_face {
+                    score += 100;
+                }
+                if face.style != base.style {
+                    score += 20;
+                }
+                score += (i32::from(face.weight.0) - i32::from(base.weight.0)).unsigned_abs();
+                if best.is_none_or(|(b, _)| score < b) {
+                    best = Some((score, face.id));
+                }
+            }
+            best.map(|(_, id)| id)
+        }),
+    }
+}
+
+/// Dot-prefixed families are private system faces; `.LastResort` in particular
+/// answers "yes" for every character while drawing the same placeholder.
+fn is_private(face: &fontdb::FaceInfo) -> bool {
+    face.families
+        .iter()
+        .any(|(f, _)| f.starts_with('.') || f.eq_ignore_ascii_case("LastResort"))
+}
+
+fn has_char(db: &fontdb::Database, id: fontdb::ID, c: char) -> bool {
+    db.with_face_data(id, |data, index| {
+        ttf_parser::Face::parse(data, index)
+            .ok()
+            .and_then(|face| face.glyph_index(c))
+            .is_some()
+    }) == Some(true)
+}
+
+fn is_emoji(c: char) -> bool {
+    matches!(
+        c as u32,
+        0x1F000..=0x1FAFF // pictographs, emoticons, flags, transport
+            | 0x2600..=0x27BF // misc symbols and dingbats
+            | 0x2B00..=0x2BFF   // arrows and geometric shapes
+            | 0x200D            // zero-width joiner
+            | 0xFE0F            // variation selector-16
+            | 0x20E3            // combining enclosing keycap
+    )
 }
 
 pub fn warm_system() {
