@@ -157,6 +157,7 @@ PNG/JPEG/WebP/GIF/BMP/TIFF + SVG（resvg）。
 | 正文/列表/引用/行内样式 | 文本 + SGR | ✅ |
 | 代码块 | 文本 + syntect 高亮 | ✅ |
 | GFM 表格 | 文本 + box-drawing（CJK 对齐） | ✅ |
+| YAML frontmatter | 文本属性卡片（yaml-rust2 解析；嵌套键展平，坏 YAML 退回高亮代码块） | ✅ |
 | 链接 | OSC8 | ✅ |
 | H1/H2 大字标题 | 像素（内嵌 Inter/系统 CJK 字体光栅） | ❌（可切 `--flat-headings`） |
 | 图片 | 像素（内容哈希缓存，宽度自适应） | ❌ |

@@ -1,6 +1,6 @@
 //! Lays out non-pixel blocks as styled terminal lines at a given width.
 
-use crate::doc::{Alert, Align, Item, Node, Span, Style};
+use crate::doc::{Alert, Align, Item, Meta, Node, Span, Style};
 use crate::highlight;
 use docmodel::{display_width, Attrs, Cell, Line, Theme};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
@@ -92,6 +92,7 @@ impl Ctx<'_> {
                     .flat_map(|l| hard_wrap(l, width, attrs))
                     .collect()
             }
+            Node::Frontmatter(entries) => self.frontmatter(entries, width),
             Node::Rule => {
                 let mut l = Line::default();
                 l.cells.push(Cell {
@@ -163,6 +164,97 @@ impl Ctx<'_> {
             }
             out.push(Line::prefixed(std::slice::from_ref(&bar), l));
         }
+        out
+    }
+
+    /// A frontmatter block reads as a small properties card: a labelled rule,
+    /// one line per field, then a closing rule. Values wrap with the key
+    /// column kept clear so multi-line block scalars stay attached to a key.
+    fn frontmatter(&self, entries: &[Meta], width: usize) -> Vec<Line> {
+        let t = self.theme;
+        let width = width.max(8);
+        let border = Attrs {
+            fg: Some(t.faint()),
+            ..Default::default()
+        };
+        let mut out = Vec::new();
+        let label = "frontmatter";
+        let mut top = Line::default();
+        if display_width(label) + 4 <= width {
+            top.cells.push(Cell {
+                text: format!("─ {label} "),
+                attrs: border,
+                url: None,
+            });
+            top.cells.push(Cell {
+                text: "─".repeat(width - display_width(label) - 3),
+                attrs: border,
+                url: None,
+            });
+        } else {
+            top.cells.push(Cell {
+                text: "─".repeat(width),
+                attrs: border,
+                url: None,
+            });
+        }
+        out.push(top);
+        let gap = 2;
+        let key_w = entries
+            .iter()
+            .map(|e| display_width(&e.key))
+            .max()
+            .unwrap_or(0)
+            .min((width / 2).max(4));
+        let val_w = width.saturating_sub(key_w + gap).max(4);
+        let key_attrs = Attrs {
+            fg: Some(t.accent()),
+            bold: true,
+            ..Default::default()
+        };
+        for entry in entries {
+            let spans = [Span {
+                text: entry.value.clone(),
+                style: Style::default(),
+                url: None,
+            }];
+            let mut body = self.wrap(&spans, val_w, Attrs::default());
+            if body.is_empty() {
+                body.push(Line::default());
+            }
+            for (i, content) in body.into_iter().enumerate() {
+                let mut line = Line::default();
+                if i == 0 {
+                    let key = clip(&entry.key, key_w);
+                    let pad = key_w.saturating_sub(display_width(&key)) + gap;
+                    line.cells.push(Cell {
+                        text: key,
+                        attrs: key_attrs,
+                        url: None,
+                    });
+                    line.cells.push(Cell {
+                        text: " ".repeat(pad),
+                        attrs: Attrs::default(),
+                        url: None,
+                    });
+                } else {
+                    line.cells.push(Cell {
+                        text: " ".repeat(key_w + gap),
+                        attrs: Attrs::default(),
+                        url: None,
+                    });
+                }
+                line.cells.extend(content.cells);
+                out.push(line);
+            }
+        }
+        let mut bottom = Line::default();
+        bottom.cells.push(Cell {
+            text: "─".repeat(width),
+            attrs: border,
+            url: None,
+        });
+        out.push(bottom);
         out
     }
 
@@ -506,6 +598,28 @@ enum Piece<'a> {
     Newline,
 }
 
+/// `s` cut to at most `max` display columns, with an ellipsis when it does
+/// not fit. Used for frontmatter keys so long ones cannot squeeze the value
+/// column out of the line.
+fn clip(s: &str, max: usize) -> String {
+    if display_width(s) <= max {
+        return s.to_string();
+    }
+    let room = max.saturating_sub(1);
+    let mut out = String::new();
+    let mut col = 0;
+    for ch in s.chars() {
+        let w = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if col + w > room {
+            break;
+        }
+        out.push(ch);
+        col += w;
+    }
+    out.push('…');
+    out
+}
+
 fn split_words(s: &str) -> Vec<Piece<'_>> {
     let mut out = Vec::new();
     let mut start = None;
@@ -789,5 +903,71 @@ mod tests {
         let out = render("终端里的中文段落排版需要按显示宽度折行而不是字符数", 20);
         assert!(out.iter().all(|l| l.width() <= 20), "{out:?}");
         assert!(out.len() > 1);
+    }
+}
+
+#[cfg(test)]
+mod frontmatter_tests {
+    use super::*;
+    use crate::doc;
+
+    fn render(md: &str, width: usize) -> Vec<String> {
+        let theme = Theme::dark_default();
+        let ctx = Ctx { theme: &theme };
+        let d = doc::parse(md);
+        let mut out = Vec::new();
+        for (i, b) in d.blocks.iter().enumerate() {
+            if i > 0 {
+                out.push(String::new());
+            }
+            out.extend(
+                ctx.node(&b.node, width)
+                    .iter()
+                    .map(|l| l.cells.iter().map(|c| c.text.as_str()).collect::<String>())
+                    .map(|l| l.trim_end().to_string()),
+            );
+        }
+        out
+    }
+
+    const MD: &str =
+        "---\ntitle: Hello\ntags: [rust, cli]\nsummary: |\n  line one\n  line two\n---\n\nbody\n";
+
+    #[test]
+    fn frontmatter_renders_as_a_properties_card() {
+        let out = render(MD, 40);
+        assert_eq!(out[0], format!("─ frontmatter {}", "─".repeat(26)));
+        assert_eq!(out[1], "title    Hello");
+        assert_eq!(out[2], "tags     rust, cli");
+        assert_eq!(out[3], "summary  line one");
+        assert_eq!(out[4], "         line two");
+        assert_eq!(out[5], "─".repeat(40));
+        assert_eq!(out[6], "");
+        assert_eq!(out[7], "body");
+    }
+
+    #[test]
+    fn frontmatter_fits_the_width() {
+        let md = "---\ntitle: a very long title that needs to wrap across lines\n---\n\nbody\n";
+        for width in [20, 30, 80] {
+            let out = render(md, width);
+            assert!(
+                out.iter().all(|l| display_width(l) <= width),
+                "{width}: {out:?}"
+            );
+            assert!(out[1].starts_with("title  "), "{out:?}");
+            assert!(out.len() > 3, "{out:?}");
+        }
+    }
+
+    #[test]
+    fn frontmatter_values_wrap_under_the_key_column() {
+        let md = "---\ndescription: alpha beta gamma delta epsilon zeta eta theta\n---\n";
+        let out = render(md, 24);
+        let value_col = display_width("description  ");
+        assert!(out.len() > 2, "{out:?}");
+        for line in &out[2..out.len() - 1] {
+            assert_eq!(&line[..value_col], " ".repeat(value_col), "{out:?}");
+        }
     }
 }

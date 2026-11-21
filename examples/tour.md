@@ -1,3 +1,15 @@
+---
+title: docp 渲染测试
+tags: [markdown, 终端, 混合渲染]
+author:
+  name: docp
+  url: https://github.com/SixinVang/kitty-doc-preview
+status: M3a
+description: |
+  一个覆盖正文、代码、表格、图表和图片的测试文档。
+  顶部这段 YAML frontmatter 会渲染成属性卡片。
+---
+
 # docp 渲染测试
 
 这是一个**混合渲染**测试文档：正文走终端文本（可搜索、可复制），

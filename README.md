@@ -105,6 +105,10 @@ and in the status bar.
   highlighted code stay real terminal text — searchable, copyable, tmux-safe.
   Only what a cell grid cannot express becomes pixels: H1/H2 display headings,
   Mermaid diagrams, and embedded images.
+- **YAML frontmatter.** A `---` block at the top of a Markdown file renders as
+  a compact properties card instead of leaking into the body: nested keys are
+  flattened to `author.name`, lists join into one line, block scalars wrap
+  under the key column, and malformed YAML falls back to a highlighted block.
 - **Mouse selection with copy.** Drag over the terminal text to select it; the
   highlight follows the document when you scroll, releasing the mouse copies
   through OSC 52 (plus a local `pbcopy`/`wl-copy`/`xclip` helper), and `y`

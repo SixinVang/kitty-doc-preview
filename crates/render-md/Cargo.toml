@@ -18,5 +18,6 @@ syntect = { workspace = true, optional = true }
 ttf-parser = { workspace = true }
 unicode-width = { workspace = true }
 xxhash-rust = { workspace = true }
+yaml-rust2 = { workspace = true }
 crossbeam-channel = { workspace = true }
 png = { workspace = true }

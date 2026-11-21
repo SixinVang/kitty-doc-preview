@@ -88,6 +88,19 @@ mod tests {
     }
 
     #[test]
+    fn frontmatter_renders_as_a_card_not_raw_dashes() {
+        let theme = Theme::dark_default();
+        let out = markdown_text("---\ntitle: Hello\ntags: [a, b]\n---\n\nbody\n", &theme, 80);
+        assert!(out.contains("frontmatter"), "no card: {out:?}");
+        assert!(out.contains("title"), "missing key: {out:?}");
+        // Adjacent words are separate cells, so SGR codes sit inside values.
+        assert!(out.contains("Hello"), "missing value: {out:?}");
+        assert!(out.contains(" b"), "missing list item: {out:?}");
+        assert!(!out.contains("---"), "raw delimiters leaked: {out:?}");
+        assert!(out.contains("body"), "body lost: {out:?}");
+    }
+
+    #[test]
     fn plain_markdown_stays_uncolored() {
         let theme = Theme::dark_default();
         let out = markdown_text("hello world\n", &theme, 80);

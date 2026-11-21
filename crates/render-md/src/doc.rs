@@ -9,6 +9,7 @@ use pulldown_cmark::{
 };
 use std::ops::Range;
 use xxhash_rust::xxh3::xxh3_64;
+use yaml_rust2::{Yaml, YamlLoader};
 
 #[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
 pub struct Style {
@@ -57,6 +58,9 @@ pub enum Node {
         start: Option<u64>,
         items: Vec<Item>,
     },
+    /// A YAML frontmatter block (`---` delimited, at the top of the file),
+    /// flattened to displayable key/value pairs.
+    Frontmatter(Vec<Meta>),
     Rule,
     Table {
         aligns: Vec<Align>,
@@ -73,6 +77,15 @@ pub enum Alert {
     Important,
     Warning,
     Caution,
+}
+
+/// One frontmatter field. Nested mappings are flattened into dotted keys and
+/// sequences are joined into a single value; the raw text is kept only when
+/// the YAML does not parse.
+#[derive(Clone, PartialEq, Debug)]
+pub struct Meta {
+    pub key: String,
+    pub value: String,
 }
 
 #[derive(Clone, PartialEq, Debug)]
@@ -135,6 +148,7 @@ struct Builder<'a> {
     image_chars: usize,
     code: Option<(String, String)>,
     html: Option<String>,
+    frontmatter: Option<String>,
     table: Option<Table>,
     top_range: Option<Range<usize>>,
     blocks: Vec<Block>,
@@ -144,6 +158,7 @@ pub fn parse(src: &str) -> Doc {
     let opts = Options::ENABLE_TABLES
         | Options::ENABLE_STRIKETHROUGH
         | Options::ENABLE_TASKLISTS
+        | Options::ENABLE_YAML_STYLE_METADATA_BLOCKS
         | Options::ENABLE_GFM;
     let mut b = Builder {
         src,
@@ -160,6 +175,7 @@ pub fn parse(src: &str) -> Doc {
         image_chars: 0,
         code: None,
         html: None,
+        frontmatter: None,
         table: None,
         top_range: None,
         blocks: Vec::new(),
@@ -204,6 +220,10 @@ impl<'a> Builder<'a> {
     }
 
     fn text(&mut self, text: &str, extra: Style) {
+        if let Some(frontmatter) = &mut self.frontmatter {
+            frontmatter.push_str(text);
+            return;
+        }
         if let Some((_, code)) = &mut self.code {
             code.push_str(text);
             return;
@@ -315,6 +335,7 @@ impl<'a> Builder<'a> {
                 self.code = Some((lang, String::new()));
             }
             Tag::HtmlBlock => self.html = Some(String::new()),
+            Tag::MetadataBlock(_) => self.frontmatter = Some(String::new()),
             Tag::List(start) => {
                 self.stack.push((Container::List(start), Vec::new()));
                 self.items.push(Vec::new());
@@ -392,6 +413,20 @@ impl<'a> Builder<'a> {
                     self.push_node(Node::Html(html), None);
                 }
             }
+            TagEnd::MetadataBlock(_) => {
+                if let Some(raw) = self.frontmatter.take() {
+                    // Malformed YAML still shows up, highlighted, instead of
+                    // silently disappearing or leaking into the next block.
+                    let node = match meta_from_yaml(&raw) {
+                        Some(entries) => Node::Frontmatter(entries),
+                        None => Node::Code {
+                            lang: "yaml".into(),
+                            text: raw,
+                        },
+                    };
+                    self.push_node(node, None);
+                }
+            }
             TagEnd::BlockQuote(_) => {
                 self.close_implicit_para();
                 if let Some((Container::Quote(alert), children)) = self.stack.pop() {
@@ -466,6 +501,93 @@ impl<'a> Builder<'a> {
             }
             _ => {}
         }
+    }
+}
+
+/// Flatten a YAML frontmatter document into displayable key/value pairs.
+/// Returns `None` when the text is not YAML (the caller falls back to a
+/// highlighted code block) or is not a mapping at the top level.
+fn meta_from_yaml(raw: &str) -> Option<Vec<Meta>> {
+    let mut docs = YamlLoader::load_from_str(raw).ok()?;
+    // A comments-only block yields no documents at all.
+    if docs.is_empty() {
+        return Some(Vec::new());
+    }
+    if docs.len() != 1 {
+        return None;
+    }
+    let mut out = Vec::new();
+    match docs.pop()? {
+        Yaml::Hash(hash) => {
+            for (k, v) in &hash {
+                flatten_meta(k, v, "", &mut out)?;
+            }
+        }
+        // An empty frontmatter block is still a frontmatter block.
+        Yaml::Null => {}
+        _ => return None,
+    }
+    Some(out)
+}
+
+fn flatten_meta(key: &Yaml, value: &Yaml, prefix: &str, out: &mut Vec<Meta>) -> Option<()> {
+    let key = match key {
+        Yaml::String(s) | Yaml::Real(s) => s.clone(),
+        Yaml::Integer(i) => i.to_string(),
+        Yaml::Boolean(b) => b.to_string(),
+        Yaml::Null => "null".to_string(),
+        _ => return None,
+    };
+    let key = if prefix.is_empty() {
+        key
+    } else {
+        format!("{prefix}.{key}")
+    };
+    match value {
+        // Nested maps read better as dotted keys than as inline braces.
+        Yaml::Hash(hash) if !hash.is_empty() && hash.keys().all(scalar_key) => {
+            for (k, v) in hash {
+                flatten_meta(k, v, &key, out)?;
+            }
+        }
+        _ => out.push(Meta {
+            key,
+            value: value_text(value),
+        }),
+    }
+    Some(())
+}
+
+fn scalar_key(k: &Yaml) -> bool {
+    matches!(
+        k,
+        Yaml::String(_) | Yaml::Real(_) | Yaml::Integer(_) | Yaml::Boolean(_) | Yaml::Null
+    )
+}
+
+/// One value as a single display string. Block scalars keep their newlines so
+/// the layout can wrap them with a hanging indent.
+fn value_text(y: &Yaml) -> String {
+    match y {
+        // Block scalars keep a trailing newline that means nothing on screen.
+        Yaml::String(s) | Yaml::Real(s) => s.trim_end().to_string(),
+        Yaml::Integer(i) => i.to_string(),
+        Yaml::Boolean(b) => b.to_string(),
+        Yaml::Null => String::new(),
+        Yaml::Array(items) => items
+            .iter()
+            .map(value_text)
+            .filter(|s| !s.is_empty())
+            .collect::<Vec<_>>()
+            .join(", "),
+        Yaml::Hash(hash) => hash
+            .iter()
+            .map(|(k, v)| format!("{}: {}", value_text(k), value_text(v)))
+            .collect::<Vec<_>>()
+            .join(", "),
+        // A resolved alias would need the anchor map; the parser only gives id.
+        Yaml::Alias(id) => format!("*{id}"),
+        Yaml::BadValue => String::new(),
     }
 }
 
@@ -608,5 +730,79 @@ mod tests {
         assert!(src[d.blocks[0].src.clone()].contains("- a"));
         assert!(src[d.blocks[1].src.clone()].contains("2. two"));
         assert!(d.blocks[0].src.end <= d.blocks[1].src.start);
+    }
+}
+
+#[cfg(test)]
+mod frontmatter_tests {
+    use super::*;
+
+    const SRC: &str = "---\ntitle: Hello\ntags: [rust, cli]\nauthor:\n  name: Ada\ndraft: false\nsummary: |\n  line one\n  line two\n---\n\n# Heading\n";
+
+    fn entries(d: &Doc) -> &[Meta] {
+        match &d.blocks[0].node {
+            Node::Frontmatter(m) => m,
+            other => panic!("expected frontmatter, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn yaml_frontmatter_becomes_a_metadata_block() {
+        let d = parse(SRC);
+        assert_eq!(d.blocks.len(), 2);
+        let got: Vec<(&str, &str)> = entries(&d)
+            .iter()
+            .map(|m| (m.key.as_str(), m.value.as_str()))
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                ("title", "Hello"),
+                ("tags", "rust, cli"),
+                ("author.name", "Ada"),
+                ("draft", "false"),
+                ("summary", "line one\nline two"),
+            ]
+        );
+        assert!(matches!(d.blocks[1].node, Node::Heading { .. }));
+    }
+
+    #[test]
+    fn frontmatter_owns_its_source_range() {
+        let d = parse(SRC);
+        let src = &SRC[d.blocks[0].src.clone()];
+        assert!(src.starts_with("---\ntitle"), "{src:?}");
+        assert!(src.trim_end().ends_with("---"), "{src:?}");
+        assert_eq!(xxh3_64(src.as_bytes()), d.blocks[0].hash);
+        assert!(d.blocks[0].src.end <= d.blocks[1].src.start);
+    }
+
+    #[test]
+    fn comments_only_frontmatter_is_an_empty_card() {
+        let d = parse("---\n# nothing but a comment\n---\n\nbody\n");
+        assert_eq!(entries(&d).len(), 0);
+        assert!(matches!(d.blocks[1].node, Node::Para(_)));
+    }
+
+    #[test]
+    fn a_lone_delimiter_pair_is_not_frontmatter() {
+        // pulldown-cmark only treats a non-empty block as metadata; without
+        // this the empty block would silently swallow the next paragraph.
+        let d = parse("---\n---\n\nbody\n");
+        assert!(matches!(d.blocks[0].node, Node::Rule));
+        assert!(matches!(d.blocks[1].node, Node::Rule));
+        assert!(matches!(d.blocks[2].node, Node::Para(_)));
+    }
+
+    #[test]
+    fn invalid_yaml_falls_back_to_a_code_block() {
+        let d = parse("---\ntitle: [unclosed\n---\n\nbody\n");
+        assert!(matches!(&d.blocks[0].node, Node::Code { lang, .. } if lang == "yaml"));
+    }
+
+    #[test]
+    fn a_rule_later_in_the_document_stays_a_rule() {
+        let d = parse("intro\n\n---\n\nafter\n");
+        assert!(d.blocks.iter().any(|b| matches!(b.node, Node::Rule)));
     }
 }
