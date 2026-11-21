@@ -86,6 +86,59 @@ pub fn transmit(out: &mut Vec<u8>, id: u32, png: &[u8], cols: u16, rows: u16) {
     }
 }
 
+/// Transmit an image without displaying it (`a=t`). A later `place()` picks a
+/// source rectangle and display box, which allows sub-cell scrolling by
+/// changing the crop without retransmitting pixels.
+pub fn transmit_only(out: &mut Vec<u8>, id: u32, png: &[u8]) {
+    let b64 = base64::engine::general_purpose::STANDARD.encode(png);
+    let bytes = b64.as_bytes();
+    let mut first = true;
+    let mut pos = 0;
+    while pos < bytes.len() {
+        let end = (pos + 4096).min(bytes.len());
+        let more = end < bytes.len();
+        out.extend_from_slice(b"\x1b_G");
+        if first {
+            let _ = write!(out, "a=t,f=100,i={id},q=2,m={}", more as u8);
+            first = false;
+        } else {
+            let _ = write!(out, "m={}", more as u8);
+        }
+        out.push(b';');
+        out.extend_from_slice(&bytes[pos..end]);
+        out.extend_from_slice(b"\x1b\\");
+        pos = end;
+    }
+    if bytes.is_empty() {
+        let _ = write!(out, "\x1b_Ga=t,f=100,i={id},q=2,m=0;\x1b\\");
+    }
+}
+
+/// Place an already transmitted image at the cursor, displaying the source
+/// band `[src_y, src_y + src_h)` (pixels) in a `cols` x `rows` cell box.
+/// `C=1` keeps the cursor in place; callers position it with `CSI row;colH`.
+#[allow(clippy::too_many_arguments)]
+pub fn place(
+    out: &mut Vec<u8>,
+    id: u32,
+    placement: u32,
+    cols: u16,
+    rows: u16,
+    src_w: u32,
+    src_y: u32,
+    src_h: u32,
+) {
+    let _ = write!(
+        out,
+        "\x1b_Ga=p,i={id},p={placement},x=0,y={src_y},w={src_w},h={src_h},c={cols},r={rows},C=1,q=2\x1b\\"
+    );
+}
+
+/// Delete one placement while keeping the image data (`d=i` with `p`).
+pub fn delete_placement(out: &mut Vec<u8>, id: u32, placement: u32) {
+    let _ = write!(out, "\x1b_Ga=d,d=i,i={id},p={placement},q=2\x1b\\");
+}
+
 /// Resize an existing virtual placement; the terminal rescales the pixels it
 /// already holds. No image data is retransmitted.
 pub fn replace_placement(out: &mut Vec<u8>, id: u32, cols: u16, rows: u16) {
@@ -394,5 +447,34 @@ mod tests {
     fn parse_file_transfer_ok() {
         assert!(parse_probe(b"\x1b_Gi=33;OK\x1b\\", Some(33)).file_transfer);
         assert!(!parse_probe(b"\x1b_Gi=33;EBADF:x\x1b\\", Some(33)).file_transfer);
+    }
+
+    #[test]
+    fn transmit_only_creates_no_placement() {
+        let mut out = Vec::new();
+        transmit_only(&mut out, 7, &[1u8; 100]);
+        let s = String::from_utf8_lossy(&out).into_owned();
+        assert!(s.starts_with("\x1b_Ga=t,f=100,i=7,q=2,m=0;"), "{s:?}");
+        assert!(!s.contains("U=1") && !s.contains("c="));
+    }
+
+    #[test]
+    fn place_encodes_crop_and_box() {
+        let mut out = Vec::new();
+        place(&mut out, 9, 1, 173, 64, 2422, 100, 2048);
+        let s = String::from_utf8_lossy(&out).into_owned();
+        assert!(
+            s.starts_with("\x1b_Ga=p,i=9,p=1,x=0,y=100,w=2422,h=2048,c=173,r=64,C=1,q=2"),
+            "{s:?}"
+        );
+        assert!(s.ends_with("\x1b\\"));
+    }
+
+    #[test]
+    fn delete_placement_keeps_image_data() {
+        let mut out = Vec::new();
+        delete_placement(&mut out, 9, 1);
+        let s = String::from_utf8_lossy(&out).into_owned();
+        assert!(s.contains("a=d,d=i,i=9,p=1"), "{s:?}");
     }
 }

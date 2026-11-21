@@ -68,6 +68,9 @@ PDF adds: `n/p` (or `]`/`[`) next/previous page · `1`–`9` jump to 10 %…90 %
   thread, sliced into ≤64-row tiles and cached in the terminal. Zooming
   re-rasterises at the new scale and pans horizontally instead of stretching
   pixels.
+- **Smooth PDF scrolling.** Tiles are transmitted once and shown as placements
+  with a source crop; a scroll only changes the crop, so the page glides by
+  pixels (a few hundred bytes per frame) instead of jumping a whole cell row.
 - **Colors from your terminal.** The `terminal` theme asks Rex for its
   foreground, background and 16-color palette at startup; `dark`/`light` are
   built-in overrides.

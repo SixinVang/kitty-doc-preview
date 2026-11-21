@@ -23,12 +23,15 @@ use std::time::{Duration, Instant};
 
 const DEBOUNCE: Duration = Duration::from_millis(15);
 const SETTLE: Duration = Duration::from_millis(100);
-/// Scroll animation: one cell-row per frame is the smallest step the terminal
-/// grid can show, so this only softens small scrolls (keys, wheel), never
-/// page turns. Rows that are not already cached snap instead.
-const GLIDE_FRAME: Duration = Duration::from_millis(12);
-const GLIDE_MS_PER_ROW: u64 = 12;
+/// Scroll animation. Tiles are shown with placements and source crops, so a
+/// glide moves the image by a few pixels per frame (真·平滑滚动), not by whole
+/// cell rows. Only small movements glide; page turns snap.
+const GLIDE_FRAME: Duration = Duration::from_millis(10);
+const GLIDE_MS_PER_ROW: u64 = 28;
 const GLIDE_MAX_ROWS: usize = 24;
+/// Placement id reused for every tile image; (image id, placement id) is the
+/// terminal-side key, so re-placing the same pair updates in place.
+const PLACEMENT: u32 = 1;
 
 /// Rows per raster tile. Big enough to amortise PNG encoding and protocol
 /// overhead, small enough that a scroll crossing a tile boundary renders one
@@ -69,10 +72,10 @@ struct Tile {
     px: u64,
 }
 
-/// A short cell-row glide for keyboard/wheel scrolling.
+/// A short scroll glide, in document pixels at the current scale.
 struct Glide {
-    from: f32,
-    to: f32,
+    from: f64,
+    to: f64,
     started: Instant,
     dur: Duration,
 }
@@ -185,11 +188,13 @@ pub fn run(path: &Path, mut caps: Caps, theme: Theme, start_page: Option<usize>)
         page_rows: Vec::new(),
         total: 0,
         top: 0,
+        frac: 0,
         follow: false,
         tiles: HashMap::new(),
         pending: HashSet::new(),
         failed: HashSet::new(),
         visible: HashSet::new(),
+        placed: HashSet::new(),
         tick: 0,
         gen: 0,
         req_tx,
@@ -265,12 +270,17 @@ struct App {
     page_rows: Vec<usize>,
     total: usize,
     top: usize,
+    /// Sub-row scroll offset in pixels, `0..cell_h`; the page image is moved
+    /// by this amount inside its cell with a placement crop.
+    frac: u32,
     follow: bool,
 
     tiles: HashMap<TileKey, Tile>,
     pending: HashSet<TileKey>,
     failed: HashSet<TileKey>,
     visible: HashSet<TileKey>,
+    /// Tiles that had a placement in the previous frame.
+    placed: HashSet<TileKey>,
     tick: u64,
 
     gen: u64,
@@ -373,6 +383,21 @@ impl App {
         self.total.saturating_sub(self.view_height())
     }
 
+    fn max_scroll_px(&self) -> u64 {
+        self.max_top() as u64 * self.cell.1 as u64
+    }
+
+    fn scroll_px(&self) -> u64 {
+        self.top as u64 * self.cell.1 as u64 + self.frac as u64
+    }
+
+    fn set_scroll_px(&mut self, px: u64) {
+        let ch = self.cell.1.max(1) as u64;
+        let px = px.min(self.max_scroll_px());
+        self.top = (px / ch) as usize;
+        self.frac = (px % ch) as u32;
+    }
+
     /// Page-number gutter: a space, the digits, and a space. Grows with the
     /// page count so a 1000-page document never writes past the terminal edge.
     fn gutter(&self) -> usize {
@@ -473,15 +498,18 @@ impl App {
     fn anchor(&self) -> (usize, f32) {
         let p = self.page_at(self.top);
         let scale = self.scale_of(p).max(0.01);
-        let off_pt = (self.top.saturating_sub(self.starts[p]) as f32 * self.cell.1 as f32) / scale;
+        let in_page =
+            self.top.saturating_sub(self.starts[p]) as f32 * self.cell.1 as f32 + self.frac as f32;
+        let off_pt = in_page / scale;
         (p, (off_pt / self.meta.sizes[p].1).clamp(0.0, 1.0))
     }
 
     fn restore(&mut self, page: usize, frac: f32) {
         let p = page.min(self.meta.pages - 1);
         let y_pt = frac * self.meta.sizes[p].1;
-        let row = (y_pt * self.scale_of(p) / self.cell.1.max(1) as f32).round() as usize;
-        self.top = (self.starts[p] + row).min(self.max_top());
+        let in_page = (y_pt * self.scale_of(p)).round().max(0.0) as u64;
+        let px = self.starts[p] as u64 * self.cell.1 as u64 + in_page;
+        self.set_scroll_px(px);
     }
 
     // ---- input ----
@@ -507,6 +535,7 @@ impl App {
             }
             Event::Resize(..) => {
                 self.glide = None;
+                let (p, frac) = self.anchor();
                 screen.resize();
                 self.cols = screen.caps.cols;
                 self.rows = screen.caps.rows;
@@ -514,7 +543,6 @@ impl App {
                     screen.caps.cell.0.max(1) as u32,
                     screen.caps.cell.1.max(1) as u32,
                 );
-                let (p, frac) = self.anchor();
                 self.clamp_x();
                 self.clear_tiles();
                 self.layout();
@@ -545,13 +573,14 @@ impl App {
             KeyCode::Char('b') | KeyCode::PageUp => self.scroll(-(page - 2), false, repaint),
             KeyCode::Char('g') | KeyCode::Home => {
                 self.glide = None;
-                self.top = 0;
+                self.set_scroll_px(0);
                 self.follow = false;
                 *repaint = true;
             }
             KeyCode::Char('G') | KeyCode::End => {
                 self.glide = None;
-                self.top = self.max_top();
+                let max = self.max_scroll_px();
+                self.set_scroll_px(max);
                 self.follow = true;
                 *repaint = true;
             }
@@ -571,7 +600,8 @@ impl App {
                 let d = c as usize - '0' as usize;
                 let p = (self.meta.pages * d / 10).min(self.meta.pages - 1);
                 self.glide = None;
-                self.top = self.starts[p];
+                let px = self.starts[p] as u64 * self.cell.1 as u64;
+                self.set_scroll_px(px);
                 self.follow = false;
                 *repaint = true;
             }
@@ -586,31 +616,33 @@ impl App {
     }
 
     fn scroll(&mut self, by: isize, animate: bool, repaint: &mut bool) {
-        let max = self.max_top();
+        let ch = self.cell.1 as i64;
+        let max = self.max_scroll_px() as i64;
         // Retarget from the pending destination so repeated keys accumulate
         // instead of restarting the glide on every press.
         let base = self
             .glide
             .as_ref()
-            .map(|g| g.to.round() as isize)
-            .unwrap_or(self.top as isize);
-        let target = (base + by).clamp(0, max as isize);
+            .map(|g| g.to.round() as i64)
+            .unwrap_or(self.scroll_px() as i64);
+        let target = (base + by as i64 * ch).clamp(0, max);
         if target == base && self.glide.is_none() {
             return;
         }
-        self.follow = target as usize == max && by > 0;
-        if animate && by.unsigned_abs() <= GLIDE_MAX_ROWS && self.tiles_ready(target as usize) {
-            let from = self.top as f32;
-            let ms = (by.unsigned_abs() as u64 * GLIDE_MS_PER_ROW).clamp(40, 180);
+        self.follow = target == max && by > 0;
+        let target_row = (target as u64 / ch as u64) as usize;
+        if animate && by.unsigned_abs() <= GLIDE_MAX_ROWS && self.tiles_ready(target_row) {
+            let from = self.scroll_px() as f64;
+            let ms = (by.unsigned_abs() as u64 * GLIDE_MS_PER_ROW).clamp(60, 240);
             self.glide = Some(Glide {
                 from,
-                to: target as f32,
+                to: target as f64,
                 started: Instant::now(),
                 dur: Duration::from_millis(ms),
             });
         } else {
             self.glide = None;
-            self.top = target as usize;
+            self.set_scroll_px(target as u64);
         }
         *repaint = true;
     }
@@ -621,17 +653,20 @@ impl App {
             return false;
         };
         let t = (g.started.elapsed().as_secs_f32() / g.dur.as_secs_f32()).clamp(0.0, 1.0);
-        // Linear keeps the 32px steps evenly spaced; ease-out front-loads a
-        // short glide into one or two frames, which reads as a jump.
-        let top = (g.from + (g.to - g.from) * t).round() as usize;
+        // Linear keeps the steps evenly spaced; ease-out front-loads a short
+        // glide into one frame, which reads as a jump.
+        let px = if t >= 1.0 {
+            g.to.round() as u64
+        } else {
+            (g.from + (g.to - g.from) * t as f64).round() as u64
+        };
+        let before = self.scroll_px();
+        self.set_scroll_px(px);
         if t >= 1.0 {
-            self.top = g.to.round() as usize;
             self.glide = None;
-            return true;
         }
-        let changed = top != self.top;
-        self.top = top;
-        if changed {
+        let after = self.scroll_px();
+        if after != before {
             if let Some(path) = std::env::var_os("DOCP_TRACE") {
                 use std::io::Write as _;
                 if let Ok(mut f) = std::fs::OpenOptions::new()
@@ -639,11 +674,11 @@ impl App {
                     .append(true)
                     .open(path)
                 {
-                    let _ = writeln!(f, "glide top={top} t={t:.2}");
+                    let _ = writeln!(f, "glide px={after} row={} frac={}", self.top, self.frac);
                 }
             }
         }
-        changed
+        after != before || t >= 1.0
     }
 
     /// Are all tiles for the viewport at `target` already in the cache?
@@ -679,8 +714,9 @@ impl App {
         self.glide = None;
         let p = self.page_at(self.top) as isize + by;
         let p = p.clamp(0, self.meta.pages as isize - 1) as usize;
-        if self.starts[p] != self.top {
-            self.top = self.starts[p];
+        let px = self.starts[p] as u64 * self.cell.1 as u64;
+        if px != self.scroll_px() {
+            self.set_scroll_px(px);
             self.follow = false;
             *repaint = true;
         }
@@ -735,9 +771,12 @@ impl App {
         {
             return;
         }
+        // One extra row at the bottom so a placement can crop a window
+        // shifted down by up to a full cell without running out of image.
+        let ch = self.cell.1;
         let rows = self.tile_rows(page, idx);
-        let h = rows as u32 * self.cell.1;
-        let y0 = idx as u32 * TILE_ROWS as u32 * self.cell.1;
+        let h = rows as u32 * ch + ch;
+        let y0 = idx as u32 * TILE_ROWS as u32 * ch;
         self.pending.insert(key);
         let _ = self.req_tx.send(Req::Render {
             key,
@@ -861,12 +900,13 @@ impl App {
                             );
                         }
                         let page = key.page as usize;
-                        let rows = self.tile_rows(page, key.idx as usize) as u16;
+                        let idx = key.idx as usize;
+                        let rows = self.tile_rows(page, idx);
                         let cols = self.page_cols();
                         let id = kgp::alloc_id();
-                        kgp::transmit(&mut self.out, id, &png, cols, rows);
-                        let px =
-                            cols as u64 * self.cell.0 as u64 * rows as u64 * self.cell.1 as u64;
+                        kgp::transmit_only(&mut self.out, id, &png);
+                        let img_h = (rows as u64 + 1) * self.cell.1 as u64;
+                        let px = self.px_w() as u64 * img_h;
                         self.tiles.insert(
                             key,
                             Tile {
@@ -914,6 +954,7 @@ impl App {
         self.pending.clear();
         self.failed.clear();
         self.visible.clear();
+        self.placed.clear();
     }
 
     // ---- watch ----
@@ -932,10 +973,16 @@ impl App {
         self.top = self.top.min(self.max_top());
         self.ensure();
         let body = self.view_height();
+        let ch = self.cell.1;
+        let frac = self.frac;
+        let gutter = self.gutter();
+        let px_w = self.px_w();
         let mut rows = Vec::with_capacity(body);
-        let mut visible = HashSet::new();
         let mut tick = self.tick;
 
+        // The image cells are blank; placements (below) draw the page over
+        // them. Keeping them blank means a sub-cell scroll changes no text at
+        // all — only the placement crops — so frames are tiny.
         for y in 0..body {
             let row = self.top + y;
             let mut s = String::from("\x1b[0m");
@@ -955,27 +1002,75 @@ impl App {
                 } else {
                     s.push_str(&" ".repeat(self.gutter()));
                 }
-                let key = self.tile_key(p, r);
-                if let Some(t) = self.tiles.get_mut(&key) {
-                    tick += 1;
-                    t.used = tick;
-                    visible.insert(key);
-                    s.push_str(&kgp::placeholder_row(t.id, (r % TILE_ROWS) as u16, t.cols));
-                }
+                s.push_str(&" ".repeat(self.page_cols() as usize));
             }
             rows.push(s);
         }
+
+        // Place every visible tile, cropped by `frac`. Re-using the same
+        // (image id, placement id) replaces the placement in place.
+        let end = (self.top + body).min(self.total);
+        let mut now = HashSet::new();
+        if end > self.top {
+            let first = self.page_at(self.top);
+            let last = self.page_at(end - 1);
+            for p in first..=last {
+                let ps = self.starts[p];
+                for idx in 0..self.tiles_in_page(p) {
+                    let ts = ps + idx * TILE_ROWS;
+                    let te = ts + self.tile_rows(p, idx);
+                    let lo = ts.max(self.top);
+                    let hi = te.min(end);
+                    if lo >= hi {
+                        continue;
+                    }
+                    let key = self.tile_key(p, idx * TILE_ROWS);
+                    let Some(t) = self.tiles.get_mut(&key) else {
+                        continue;
+                    };
+                    tick += 1;
+                    t.used = tick;
+                    now.insert(key);
+                    let skip = lo - ts;
+                    let vis_rows = hi - lo;
+                    let src_y = skip as u32 * ch + frac;
+                    let src_h = vis_rows as u32 * ch;
+                    let screen_row = lo - self.top;
+                    let id = t.id;
+                    let cols = t.cols;
+                    self.out.extend_from_slice(
+                        format!("\x1b[{};{}H", screen_row + 1, gutter + 1).as_bytes(),
+                    );
+                    kgp::place(
+                        &mut self.out,
+                        id,
+                        PLACEMENT,
+                        cols,
+                        vis_rows as u16,
+                        px_w,
+                        src_y,
+                        src_h,
+                    );
+                }
+            }
+        }
+        let stale: Vec<TileKey> = self.placed.difference(&now).copied().collect();
+        for key in stale {
+            if let Some(t) = self.tiles.get(&key) {
+                kgp::delete_placement(&mut self.out, t.id, PLACEMENT);
+            }
+        }
+        self.visible = now.clone();
+        self.placed = now;
         self.tick = tick;
-        self.visible = visible;
         self.evict();
 
         let page = self.page_at(self.top);
-        let max_top = self.max_top();
-        // 0 % at the top, 100 % at the bottom; a single-screen document is 100 %.
-        let pct = (self.top.min(max_top) * 100)
-            .checked_div(max_top)
+        let max_px = self.max_scroll_px();
+        let pct = (self.scroll_px() * 100)
+            .checked_div(max_px)
             .unwrap_or(100)
-            .min(100);
+            .min(100) as usize;
         let mut right = format!(
             "p {}/{} · {:.0}% · {}%",
             page + 1,

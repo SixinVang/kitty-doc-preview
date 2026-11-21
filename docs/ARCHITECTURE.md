@@ -182,9 +182,14 @@ trait PdfBackend {          // 抽象留给未来 pdfium 备胎，先只写 mupd
 - 页宽 = 视口 cell 宽 → 物理像素宽；缩放 = 像素宽/页宽 pt（fit-width 默认，`z/Z` 缩放倍率）
 - 只光栅化**可见矩形 ± 半屏预取**，输出 ≤280 行的 tile；缓存键 `(page, zoom, tile_idx, px_w)`
 - 实现：`render-pdf` 只暴露 `render_band(page, scale, x0, y0, w, h)`，用 draw device 的
-  pixmap 边界裁剪，不整页光栅化；tile 高 64 行，LRU 32 项并设 48M 像素预算，跨页 ±1 预取。
-  实测 2170×2048 px tile（含 PNG 编码）约 10–15 ms。`z/Z` 改变 scale 后按
-  x 中心锚定，水平用 `h/l` 平移（不放大旧位图）。
+  pixmap 边界裁剪，不整页光栅化；tile 高 64 行 + 1 行裁剪余量，LRU 32 项并设 48M 像素
+  预算，跨页 ±1 预取。实测 2170×2048 px tile（含 PNG 编码）约 10–15 ms。`z/Z` 改变
+  scale 后按 x 中心锚定，水平用 `h/l` 平移（不放大旧位图）。
+- **放置（平滑滚动）**：tile 用 `a=t` 只传输不显示，再用 `a=p` + `x/y/w/h` 源裁剪放到
+  `c×r` cell 盒。滚动量拆成整数行 + `frac` 像素；`frac` 只改 placement 的源裁剪，
+  不重传像素、不重绘文本 → **亚 cell 平滑滚动**。每帧只发 2–3 条 placement；tile 多
+  光栅化底部一行作为 `frac` 余量。placement id 固定，同 `(image, placement)` 原位覆盖；
+  离开视口时 `a=d,d=i,p=1` 删除 placement，图像留在缓存里。
 - mupdf `Document` 非 Sync：**单一渲染线程持有文档**，主线程投递 job（channel），结果带 media id 回主线程。text/outline 提取在同线程做首次缓存。实测单 tile 10–20ms，足够；不够再开多文档副本分片
 - **依赖坑**：`mupdf` crate 默认开 `js` feature，会把 MuPDF 自带 MuJS 编进来；
   它与 Mermaid 用的 rquickjs 同名 `js_malloc/js_free/...` 冲突，链出来的
@@ -218,7 +223,7 @@ trait PdfBackend {          // 抽象留给未来 pdfium 备胎，先只写 mupd
 | 缓存 | 键 | 容量 | 淘汰 |
 |---|---|---|---|
 | md 媒体 | xxhash(内容+主题+尺寸) | ~64 项 | LRU，删除终端侧数据 |
-| PDF tile | (gen, page, tile, px_w, cell_h, x) | 32 tile / 48M px | LRU（可见 tile 不淘汰），删除终端侧数据 |
+| PDF tile | (gen, page, tile, px_w, cell_h, x) | 32 tile / 48M px | LRU（可见 tile 不淘汰）；placement 离开视口即删，图像数据保留 |
 | PDF 文本层 | page | 全书（纯文本很小） | 不淘汰 |
 | 终端侧图片 | image id | kitty 配额内 | 主动 a=d |
 
@@ -274,6 +279,7 @@ docp bench <file>           # headless 计时
 | Rex 对 `t=f` 文件传输、`a=f` 动画帧支持未知 | 启动特性探测，全部有 `t=d`/无动画 fallback |
 | mupdf 单线程渲染成为瓶颈 | 先测（2170×2048 tile 10–15 ms，够用）；必要时多 Document 实例分片 |
 | mupdf 自带 MuJS 与 rquickjs 符号冲突 | 关闭 `mupdf` 默认 feature（`js`），见 §5.3；Mermaid 回归验证 |
+| 亚 cell 滚动依赖终端支持 placement 源裁剪/原位覆盖 | Rex（libghostty）实测 178×86、cell 14×32 可用；不支持时退回 cell 级滚动 |
 | Rex 先给新 pane 一个 80×24 / 8×16 的占位尺寸，随后才布局成真实尺寸；cell 探测早于布局时，tile 像素纵横比与 placement 不一致，终端按比例缩放会 letterbox（页中间出现一条背景灰带） | `caps::settle()` 在进入界面前等 winsize 稳定并重探 `CSI 16t`；运行中 resize 防抖后由唯一的 tty 读线程 `input::Input::cell()` 重探（避免与键盘读取抢应答），imgview 在主线程直接重探 |
 | 大页深缩放 tile 数量爆炸 | 固定 64 行 tile + 像素预算淘汰；只光栅化可见矩形 |
 | CJK 在 SGR 文本路径的宽度歧义（emoji/组合字） | unicode-width + 实测校正表；文本路径可复制优先于完美对齐 |
@@ -284,6 +290,6 @@ docp bench <file>           # headless 计时
 - **M0 spike**（先跑通 Rex）：workspace + kgp + termui + render-img 单图显示；验证 t=f 探测
 - **M1**：render-md 全量（tkmp 迁移 + syntect + 表格 CJK）+ watch + cat 模式
 - **M2**（已完成）：render-pdf：fit-width 视口 tile + 翻页 + 预取 + z/Z + 水平平移；
-  watch 重开；`--page`（图片动图顺延到 M3）
+  像素级平滑滚动；watch 重开；`--page`（图片动图顺延到 M3）
 - **M3**：PDF 文本层：搜索/高亮/链接/大纲/OSC52 选择
 - **M4**：纯文本降级打磨、bench、发布（cargo-brew / install.sh）
