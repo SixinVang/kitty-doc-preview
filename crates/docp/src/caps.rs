@@ -31,10 +31,7 @@ pub fn detect(timeout_ms: u64) -> Result<Caps> {
         ypixel: 0,
     });
 
-    let mut ioctl_cell = None;
-    if ws.xpixel > 0 && ws.cols > 0 && ws.ypixel > 0 && ws.rows > 0 {
-        ioctl_cell = Some(((ws.xpixel / ws.cols).max(1), (ws.ypixel / ws.rows).max(1)));
-    }
+    let ioctl_cell = ioctl_cell(&ws);
 
     // One round trip: colors, cell size, graphics support, placeholders.
     let mut q = Vec::new();
@@ -67,15 +64,7 @@ pub fn detect(timeout_ms: u64) -> Result<Caps> {
         );
     }
     let p = kgp::parse_probe(&buf, None);
-    // CSI 16t reports the cell size of *this* pane; the winsize ioctl can
-    // report the whole window's pixel size divided by the pane's columns,
-    // which inflates the cell and makes every image get downscaled (pale,
-    // blurry text). Trust the terminal's own answer first.
-    let cell = match (p.cell, ioctl_cell) {
-        (Some(csi), _) => csi,
-        (None, Some(io)) => io,
-        (None, None) => (8, 16),
-    };
+    let cell = pick_cell(p.cell, ioctl_cell).unwrap_or((8, 16));
     trace_caps(&format!(
         "cell csi={:?} ioctl={:?} -> {cell:?} winsize={}x{}{}",
         p.cell,
@@ -174,7 +163,57 @@ pub fn probe_cell(timeout_ms: u64) -> Option<(u16, u16)> {
     q.extend_from_slice(b"\x1b[16t");
     q.extend_from_slice(kgp::DA1);
     let buf = termui::query_tty(&q, termui::Stop::Da1, Duration::from_millis(timeout_ms)).ok()?;
-    kgp::parse_probe(&buf, None).cell
+    pick_cell(
+        kgp::parse_probe(&buf, None).cell,
+        ioctl_cell(&termui::tty_winsize().ok()?),
+    )
+}
+
+fn ioctl_cell(ws: &termui::Winsize) -> Option<(u16, u16)> {
+    if ws.xpixel > 0 && ws.cols > 0 && ws.ypixel > 0 && ws.rows > 0 {
+        Some(((ws.xpixel / ws.cols).max(1), (ws.ypixel / ws.rows).max(1)))
+    } else {
+        None
+    }
+}
+
+/// Pixel size of one cell, in the terminal's device pixels.
+///
+/// `CSI 16t` answers in logical pixels on a HiDPI screen (Rex reports 8x16
+/// for a 14x32 cell), while `TIOCGWINSZ` reports the pane in device pixels.
+/// Raster content has to be drawn in device pixels: otherwise the terminal
+/// scales every heading and diagram up, non-uniformly when the two axes
+/// differ, which is what makes pixel text look soft and slightly squashed.
+///
+/// The ioctl is only trusted when its cell is plausible and close to the
+/// reported one, because some terminals fill the pixel fields with the whole
+/// window instead of the pane.
+fn pick_cell(csi: Option<(u16, u16)>, ioctl: Option<(u16, u16)>) -> Option<(u16, u16)> {
+    let plausible =
+        |c: (u16, u16)| c.0 > 0 && c.1 > 0 && (1.2..=3.2).contains(&(c.1 as f32 / c.0 as f32));
+    match (csi, ioctl) {
+        (Some(c), Some(i)) if plausible(c) && plausible(i) => {
+            let rx = i.0 as f32 / c.0 as f32;
+            let ry = i.1 as f32 / c.1 as f32;
+            let close = (1.0..=4.0).contains(&rx)
+                && (1.0..=4.0).contains(&ry)
+                && (rx / ry - 1.0).abs() <= 0.35;
+            if close {
+                trace_caps(&format!(
+                    "cell scale {rx:.2}x{ry:.2} (csi {c:?}, ioctl {i:?}) -> device {i:?}"
+                ));
+                Some(i)
+            } else {
+                trace_caps(&format!(
+                    "cell ioctl {i:?} disagrees with csi {c:?}; using csi"
+                ));
+                Some(c)
+            }
+        }
+        (Some(c), _) => Some(c),
+        (None, Some(i)) => Some(i),
+        (None, None) => None,
+    }
 }
 
 /// Wait for the pane to be laid out, then re-read its size and cell.
@@ -184,8 +223,8 @@ pub fn probe_cell(timeout_ms: u64) -> Option<(u16, u16)> {
 /// cell size that does not match the pixels the terminal actually uses, and
 /// image placements then get letterboxed (a tile looks `c*r` cells but its
 /// pixels have the wrong aspect, so the terminal leaves bands of background).
-/// Only `CSI 16t` is trusted here: the winsize ioctl's pixel fields can
-/// describe the whole window in a split pane.
+/// The cell is taken in device pixels (see `pick_cell`), so a font-size change
+/// also re-derives the resolution the raster content must be drawn at.
 pub fn settle(caps: &mut Caps) {
     let key = |ws: &termui::Winsize| (ws.cols.max(1), ws.rows.max(1));
     let mut last = termui::tty_winsize().ok().map(|w| key(&w));
@@ -255,5 +294,38 @@ pub fn kind(path: &std::path::Path) -> Kind {
         Some("md" | "markdown" | "mdx" | "mdown" | "mkd") => Kind::Markdown,
         Some("pdf") => Kind::Pdf,
         _ => Kind::Image,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hi_dpi_ioctl_wins_over_logical_csi() {
+        // Rex: CSI 16t answers in logical pixels (8x16), the pty's winsize in
+        // device pixels (14x32).
+        assert_eq!(pick_cell(Some((8, 16)), Some((14, 32))), Some((14, 32)));
+        assert_eq!(pick_cell(Some((7, 16)), Some((14, 32))), Some((14, 32)));
+        // Same cell size on both: nothing to scale.
+        assert_eq!(pick_cell(Some((8, 16)), Some((8, 16))), Some((8, 16)));
+        assert_eq!(pick_cell(Some((8, 16)), Some((16, 32))), Some((16, 32)));
+    }
+
+    #[test]
+    fn implausible_ioctl_does_not_win() {
+        // Whole-window pixels divided by pane columns: not a cell shape.
+        assert_eq!(pick_cell(Some((8, 16)), Some((160, 90))), Some((8, 16)));
+        // Device cell more than 4x the reported one is not a scale factor.
+        assert_eq!(pick_cell(Some((8, 16)), Some((40, 80))), Some((8, 16)));
+        // x and y disagree by more than 35%: not a uniform scale.
+        assert_eq!(pick_cell(Some((8, 16)), Some((8, 48))), Some((8, 16)));
+    }
+
+    #[test]
+    fn single_source_is_used_as_is() {
+        assert_eq!(pick_cell(Some((9, 18)), None), Some((9, 18)));
+        assert_eq!(pick_cell(None, Some((9, 18))), Some((9, 18)));
+        assert_eq!(pick_cell(None, None), None);
     }
 }
