@@ -78,6 +78,13 @@ impl Config {
         toml::from_str(&text).with_context(|| format!("parse config {}", path.display()))
     }
 
+    /// The file the loader would use and whether it exists, for `--info`.
+    pub fn source(explicit: Option<&Path>) -> Option<(PathBuf, bool)> {
+        let path = explicit.map(Path::to_path_buf).or_else(default_path)?;
+        let exists = path.exists();
+        Some((path, exists))
+    }
+
     /// Apply command-line overrides on top of the file.
     pub fn apply_cli(&mut self, cli: &CliOverrides) {
         if let Some(t) = &cli.theme {

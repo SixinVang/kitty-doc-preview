@@ -103,6 +103,19 @@ fn main() -> Result<()> {
     if cli.info {
         println!("{caps:#?}");
         println!("{config:#?}");
+        match config::Config::source(cli.config.as_deref()) {
+            Some((path, true)) => println!("config: {} (loaded)", path.display()),
+            Some((path, false)) => {
+                println!("config: {} (not found: using defaults)", path.display())
+            }
+            None => println!("config: none (using defaults)"),
+        }
+        println!(
+            "fonts: sans={} display={} mono={}",
+            render_md::fonts::sans_family(),
+            render_md::fonts::display_family(),
+            render_md::fonts::mono_family()
+        );
         return Ok(());
     }
 
