@@ -81,8 +81,10 @@ name = "terminal"            # terminal | dark | light
 [fonts]
 sans = "PingFang SC"         # headings / pixel text (system family is fine)
 mono = "JetBrains Mono"      # diagram labels
+emoji = "Noto Color Emoji"   # emoji runs (defaults to the best installed)
 sans_file = ""               # optional files win over the families
 mono_file = ""
+emoji_file = ""
 
 [layout]
 max_width = 110              # text column clamp, in cells

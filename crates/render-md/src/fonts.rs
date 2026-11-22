@@ -32,6 +32,10 @@ pub struct FontSpec {
     pub sans_file: Option<String>,
     /// Font file backing `mono`.
     pub mono_file: Option<String>,
+    /// Family for emoji runs (else the best installed emoji font is used).
+    pub emoji: Option<String>,
+    /// Font file backing `emoji`.
+    pub emoji_file: Option<String>,
 }
 
 static SPEC: OnceLock<FontSpec> = OnceLock::new();
@@ -71,6 +75,8 @@ fn family_of(face: &Face<'_>) -> Option<String> {
 struct Text {
     user_sans: Option<Loaded>,
     user_mono: Option<Loaded>,
+    user_emoji: Option<Loaded>,
+    emoji_spec: Option<String>,
     regular: Face<'static>,
     semibold: Face<'static>,
     display_bold: Face<'static>,
@@ -90,6 +96,7 @@ static TEXT: LazyLock<Text> = LazyLock::new(|| {
     let s = spec();
     let user_sans = s.sans_file.as_deref().and_then(load_file);
     let user_mono = s.mono_file.as_deref().and_then(load_file);
+    let user_emoji = s.emoji_file.as_deref().and_then(load_file);
 
     let sans_family = user_sans
         .as_ref()
@@ -115,6 +122,8 @@ static TEXT: LazyLock<Text> = LazyLock::new(|| {
     Text {
         user_sans,
         user_mono,
+        user_emoji,
+        emoji_spec: s.emoji.clone(),
         regular: Face::parse(INTER, 0).expect("Inter"),
         semibold: Face::parse(INTER_SEMIBOLD, 0).expect("Inter SemiBold"),
         display_bold: Face::parse(DISPLAY_BOLD, 0).expect("Inter Display Bold"),
@@ -308,6 +317,9 @@ fn embedded_db() -> fontdb::Database {
     if let Some(l) = &t.user_mono {
         db.load_font_source(fontdb::Source::Binary(Arc::new(l.bytes)));
     }
+    if let Some(l) = &t.user_emoji {
+        db.load_font_source(fontdb::Source::Binary(Arc::new(l.bytes)));
+    }
     db
 }
 
@@ -336,6 +348,73 @@ pub fn with_system() -> Arc<fontdb::Database> {
         .clone()
 }
 
+/// Family used for emoji runs: the configured one, its file, or the best
+/// installed emoji font (Noto Color Emoji before Apple's, since Noto tracks
+/// Unicode releases and covers emoji Apple's font does not).
+pub fn emoji_family() -> Option<&'static str> {
+    static EMOJI: OnceLock<Option<String>> = OnceLock::new();
+    EMOJI
+        .get_or_init(|| {
+            let t = &*TEXT;
+            if let Some(l) = &t.user_emoji {
+                if let Some(family) = family_of(&l.face) {
+                    return Some(family);
+                }
+            }
+            if let Some(family) = &t.emoji_spec {
+                return Some(family.clone());
+            }
+            let db = with_system();
+            ["Noto Color Emoji", "Apple Color Emoji"]
+                .into_iter()
+                .find(|name| {
+                    db.query(&fontdb::Query {
+                        families: &[fontdb::Family::Name(name)],
+                        ..Default::default()
+                    })
+                    .is_some()
+                })
+                .map(str::to_string)
+        })
+        .as_deref()
+}
+
+/// Split a line into `(is_emoji, text)` runs.
+///
+/// Emoji presentation is not just "codepoint is in an emoji block": `©️`,
+/// `™️`, `↔️`, `‼️`, `1️⃣` start with a character the CJK/Latin font also has,
+/// so without a run forcing the emoji family they render as monochrome text
+/// and the variation selector is dropped. A base character followed by
+/// U+FE0F (VS16) is an emoji by definition, and ZWJ joins the cluster.
+pub fn emoji_runs(text: &str) -> Vec<(bool, &str)> {
+    let chars: Vec<(usize, char)> = text.char_indices().collect();
+    let mut flags = Vec::with_capacity(chars.len());
+    for (i, &(_, c)) in chars.iter().enumerate() {
+        let next = chars.get(i + 1).map(|(_, c)| *c);
+        let prev = i.checked_sub(1).map(|p| chars[p].1);
+        let emoji = is_emoji_char(c)
+            || next == Some('\u{FE0F}')
+            || prev == Some('\u{200D}')
+            || matches!(c, '\u{200D}' | '\u{FE0F}' | '\u{20E3}')
+            || ('\u{E0020}'..='\u{E007F}').contains(&c);
+        flags.push(emoji);
+    }
+    let mut out = Vec::new();
+    let mut start = 0;
+    while start < chars.len() {
+        let emoji = flags[start];
+        let mut end = start + 1;
+        while end < chars.len() && flags[end] == emoji {
+            end += 1;
+        }
+        let byte_start = chars[start].0;
+        let byte_end = chars.get(end).map(|(b, _)| *b).unwrap_or(text.len());
+        out.push((emoji, &text[byte_start..byte_end]));
+        start = end;
+    }
+    out
+}
+
 /// Font resolver for resvg.
 ///
 /// The default fallback selector walks `fontdb` in load order, and on macOS
@@ -356,8 +435,20 @@ pub fn font_resolver() -> usvg::FontResolver<'static> {
                 }
                 let mut score = 0u32;
                 let emoji_face = face.families.iter().any(|(f, _)| f.contains("Emoji"));
-                if is_emoji(c) {
-                    score += if emoji_face { 0 } else { 1000 };
+                if is_emoji_char(c) {
+                    let wanted = emoji_family();
+                    let is_wanted = wanted
+                        .map(|w| face.families.iter().any(|(f, _)| f == w))
+                        .unwrap_or(false);
+                    score += if is_wanted {
+                        0
+                    } else if wanted.is_some() {
+                        200
+                    } else if emoji_face {
+                        0
+                    } else {
+                        1000
+                    };
                 } else if emoji_face {
                     score += 1000;
                 } else if is_wide(c) {
@@ -414,7 +505,8 @@ fn has_char(db: &fontdb::Database, id: fontdb::ID, c: char) -> bool {
     }) == Some(true)
 }
 
-fn is_emoji(c: char) -> bool {
+/// True for emoji-presentation characters and the joiners that build them.
+pub fn is_emoji_char(c: char) -> bool {
     matches!(
         c as u32,
         0x1F000..=0x1FAFF // pictographs, emoticons, flags, transport
@@ -479,6 +571,24 @@ mod tests {
         assert!(embedded_has_family(DEFAULT_MONO));
         // Not shipped with docp: must come from the system database.
         assert!(!embedded_has_family("PingFang SC"));
+    }
+
+    #[test]
+    fn emoji_runs_follow_variation_selectors() {
+        // Variation selector 16 turns a text-default character into an emoji.
+        assert_eq!(
+            emoji_runs("准备❤\u{FE0F}Podman"),
+            vec![(false, "准备"), (true, "❤\u{FE0F}"), (false, "Podman")]
+        );
+        assert_eq!(emoji_runs("©\u{FE0F}")[0].0, true);
+        assert_eq!(emoji_runs("©")[0].0, false);
+        assert_eq!(emoji_runs("1\u{FE0F}\u{20E3}")[0].0, true);
+        // ZWJ clusters stay in one run.
+        let runs = emoji_runs("👨\u{200D}👩\u{200D}👧");
+        assert_eq!(runs.len(), 1);
+        assert!(runs[0].0);
+        // Text stays text.
+        assert_eq!(emoji_runs("准备运行环境"), vec![(false, "准备运行环境")]);
     }
 
     #[test]

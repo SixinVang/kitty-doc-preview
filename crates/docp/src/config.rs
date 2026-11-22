@@ -44,8 +44,10 @@ pub struct ThemeSection {
 pub struct FontsSection {
     pub sans: Option<String>,
     pub mono: Option<String>,
+    pub emoji: Option<String>,
     pub sans_file: Option<String>,
     pub mono_file: Option<String>,
+    pub emoji_file: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -104,6 +106,13 @@ impl Config {
         if let Some(p) = &cli.font_mono_file {
             self.fonts.mono_file = Some(p.clone());
         }
+        if let Some(f) = &cli.font_emoji {
+            self.fonts.emoji = Some(f.clone());
+            self.fonts.emoji_file = None;
+        }
+        if let Some(p) = &cli.font_emoji_file {
+            self.fonts.emoji_file = Some(p.clone());
+        }
         if let Some(w) = cli.max_width {
             self.layout.max_width = w;
         }
@@ -115,6 +124,8 @@ impl Config {
             mono: self.fonts.mono.clone(),
             sans_file: self.fonts.sans_file.clone().filter(|s| !s.is_empty()),
             mono_file: self.fonts.mono_file.clone().filter(|s| !s.is_empty()),
+            emoji: self.fonts.emoji.clone(),
+            emoji_file: self.fonts.emoji_file.clone().filter(|s| !s.is_empty()),
         }
     }
 }
@@ -128,6 +139,8 @@ pub struct CliOverrides {
     pub font_mono: Option<String>,
     pub font_sans_file: Option<String>,
     pub font_mono_file: Option<String>,
+    pub font_emoji: Option<String>,
+    pub font_emoji_file: Option<String>,
     pub max_width: Option<usize>,
 }
 

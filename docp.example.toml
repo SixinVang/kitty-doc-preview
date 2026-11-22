@@ -21,6 +21,13 @@ name = "terminal"
 sans = "Inter"
 mono = "JetBrains Mono"
 
+# Family used for emoji runs in pixel text. Leave it out to use the best
+# installed emoji font (Noto Color Emoji, then Apple Color Emoji). Emoji
+# sequences like ©️ / 1️⃣ / ↔️ are forced onto this family, otherwise the CJK
+# face would draw them as monochrome text.
+#   emoji = "Noto Color Emoji"
+emoji = ""
+
 # Optional font files. When set they win over the family names above. A file
 # also pins exact metrics, which is handy when the system font may change.
 # Example:
@@ -28,6 +35,7 @@ mono = "JetBrains Mono"
 #   mono_file = "/Users/me/Library/Fonts/Iosevka-Regular.ttf"
 sans_file = ""
 mono_file = ""
+emoji_file = ""
 
 [layout]
 # Clamp for the text column, in terminal cells. Wide terminals get margins

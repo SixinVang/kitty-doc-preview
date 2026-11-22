@@ -130,7 +130,27 @@ pub fn heading(h: &Heading, color: Rgb, cell: Cell) -> Result<Raster, String> {
         h.cols as u32 * cell.w,
         h.rows() as u32 * cell.h
     );
+    let emoji_family = fonts::emoji_family();
     for (i, line) in h.lines.iter().enumerate() {
+        // Emoji runs get their own family so `©️`-style sequences stay color
+        // emoji instead of being eaten by the CJK/Latin face.
+        let body = match emoji_family {
+            Some(family) if line.chars().any(fonts::is_emoji_char) => fonts::emoji_runs(line)
+                .into_iter()
+                .map(|(emoji, run)| {
+                    if emoji {
+                        format!(
+                            r#"<tspan font-family="{}">{}</tspan>"#,
+                            escape(family),
+                            escape(run)
+                        )
+                    } else {
+                        escape(run)
+                    }
+                })
+                .collect::<String>(),
+            _ => escape(line),
+        };
         svg.push_str(&format!(
             r#"<text x="0" y="{:.1}" font-family="{}" font-weight="{}" font-size="{:.1}" fill="{}">{}</text>"#,
             baseline + i as f32 * line_px,
@@ -138,7 +158,7 @@ pub fn heading(h: &Heading, color: Rgb, cell: Cell) -> Result<Raster, String> {
             weight,
             fs,
             color.hex(),
-            escape(line)
+            body
         ));
     }
     svg.push_str("</svg>");

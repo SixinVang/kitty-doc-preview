@@ -44,6 +44,12 @@ struct Cli {
     /// Font file to use for monospace text
     #[arg(long, value_name = "PATH")]
     font_mono_file: Option<String>,
+    /// Emoji family for pixel text (defaults to the best installed one).
+    #[arg(long, env = "DOCP_FONT_EMOJI")]
+    font_emoji: Option<String>,
+    /// Font file backing `--font-emoji`.
+    #[arg(long, env = "DOCP_FONT_EMOJI_FILE")]
+    font_emoji_file: Option<String>,
     /// Text column width clamp, in cells
     #[arg(long, value_name = "CELLS")]
     max_width: Option<usize>,
@@ -94,6 +100,8 @@ fn main() -> Result<()> {
         font_mono: cli.font_mono.clone(),
         font_sans_file: cli.font_sans_file.clone(),
         font_mono_file: cli.font_mono_file.clone(),
+        font_emoji: cli.font_emoji.clone(),
+        font_emoji_file: cli.font_emoji_file.clone(),
         max_width: cli.max_width,
     });
     // Fonts must be configured before the first render loads them.
@@ -115,6 +123,10 @@ fn main() -> Result<()> {
             render_md::fonts::sans_family(),
             render_md::fonts::display_family(),
             render_md::fonts::mono_family()
+        );
+        println!(
+            "fonts: emoji={}",
+            render_md::fonts::emoji_family().unwrap_or("(none)")
         );
         return Ok(());
     }
