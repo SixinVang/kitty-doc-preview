@@ -202,7 +202,44 @@ fn encode_png(p: &Pixmap) -> Result<Vec<u8>, String> {
 
 fn needs_system_fonts(svg: &str) -> bool {
     // Only text content matters; markup is ASCII.
-    !svg.is_ascii() && !fonts::covers(&text_content(svg))
+    if !svg.is_ascii() && !fonts::covers(&text_content(svg)) {
+        return true;
+    }
+    // A family configured by name lives only in the system database. Without
+    // it the embedded database has no match at all and resvg silently drops
+    // the text, which made pure-ASCII headings render blank.
+    requested_families(svg)
+        .iter()
+        .any(|f| !fonts::embedded_has_family(f))
+}
+
+/// Families named by `font-family` attributes in an SVG we wrote.
+fn requested_families(svg: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut rest = svg;
+    while let Some(start) = rest.find("font-family=") {
+        rest = &rest[start + "font-family=".len()..];
+        let Some(quote) = rest.chars().next().filter(|c| *c == '"' || *c == '\'') else {
+            continue;
+        };
+        rest = &rest[quote.len_utf8()..];
+        let Some(end) = rest.find(quote) else { break };
+        for family in rest[..end].split(',') {
+            let family = family.trim().trim_matches('"').trim_matches('\'').trim();
+            if !family.is_empty() && !is_generic(family) {
+                out.push(family.to_string());
+            }
+        }
+        rest = &rest[end..];
+    }
+    out
+}
+
+fn is_generic(family: &str) -> bool {
+    matches!(
+        family.to_ascii_lowercase().as_str(),
+        "serif" | "sans-serif" | "monospace" | "cursive" | "fantasy" | "system-ui" | "inherit"
+    )
 }
 
 fn text_content(svg: &str) -> String {
@@ -251,6 +288,25 @@ mod tests {
         assert!(h.cols <= 40, "{} cols", h.cols);
         let r = heading(&h, Rgb(0, 0, 0), CELL).unwrap();
         assert_eq!(r.rows, 3);
+    }
+
+    #[test]
+    fn requested_families_are_parsed() {
+        let svg =
+            r#"<text font-family="Inter Display, sans-serif" font-family='PingFang SC'>x</text>"#;
+        let fams = requested_families(svg);
+        assert_eq!(fams, ["Inter Display", "PingFang SC"]);
+        assert!(!fams.iter().any(|f| f == "sans-serif"));
+    }
+
+    #[test]
+    fn system_family_requests_system_database() {
+        // Pure ASCII: the embedded database covers the text, so only the
+        // family check can tell that Inter cannot draw it.
+        let svg = r#"<svg xmlns="http://www.w3.org/2000/svg"><text font-family="PingFang SC" font-size="12">Podman</text></svg>"#;
+        assert!(needs_system_fonts(svg));
+        let svg = r#"<svg xmlns="http://www.w3.org/2000/svg"><text font-family="Inter Display" font-size="12">Podman</text></svg>"#;
+        assert!(!needs_system_fonts(svg));
     }
 
     #[test]

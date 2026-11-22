@@ -79,7 +79,7 @@ docp --config ./docp.toml notes.md
 name = "terminal"            # terminal | dark | light
 
 [fonts]
-sans = "Inter"               # headings / pixel text
+sans = "PingFang SC"         # headings / pixel text (system family is fine)
 mono = "JetBrains Mono"      # diagram labels
 sans_file = ""               # optional files win over the families
 mono_file = ""

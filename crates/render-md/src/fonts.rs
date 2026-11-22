@@ -6,8 +6,9 @@
 //! first use; the CLI calls `configure` right after parsing arguments.
 
 use resvg::usvg::{self, fontdb};
+use std::collections::HashMap;
 use std::path::Path;
-use std::sync::{Arc, LazyLock, OnceLock};
+use std::sync::{Arc, LazyLock, Mutex, OnceLock};
 use ttf_parser::Face;
 
 static INTER: &[u8] = include_bytes!("../assets/fonts/Inter-Regular.ttf");
@@ -78,6 +79,11 @@ struct Text {
     sans_family: String,
     mono_family: String,
     display_family: String,
+    /// Families configured by name only: their faces live in the system
+    /// database, so measurement and rendering both have to resolve them there.
+    sans_system: bool,
+    mono_system: bool,
+    display_system: bool,
 }
 
 static TEXT: LazyLock<Text> = LazyLock::new(|| {
@@ -101,6 +107,10 @@ static TEXT: LazyLock<Text> = LazyLock::new(|| {
     } else {
         DEFAULT_DISPLAY.to_string()
     };
+    // A family given by name (no file) can only come from the system database.
+    let sans_system = user_sans.is_none() && s.sans.is_some();
+    let mono_system = user_mono.is_none() && s.mono.is_some();
+    let display_system = sans_system || (s.sans.is_some() && s.sans_file.is_none());
 
     Text {
         user_sans,
@@ -113,6 +123,9 @@ static TEXT: LazyLock<Text> = LazyLock::new(|| {
         sans_family,
         mono_family,
         display_family,
+        sans_system,
+        mono_system,
+        display_system,
     }
 });
 
@@ -141,18 +154,78 @@ pub enum Weight {
     Mono,
 }
 
+/// Faces resolved from the system database, keyed by family and CSS weight.
+/// Their bytes are copied once and leaked so the parsed `Face` can be cached
+/// and used for measurement exactly like an embedded or file-backed face.
+type FaceCache = Mutex<HashMap<(String, u16), Option<&'static Face<'static>>>>;
+static SYSTEM_FACES: LazyLock<FaceCache> = LazyLock::new(|| Mutex::new(HashMap::new()));
+
+fn system_face(family: &str, css_weight: u16) -> Option<&'static Face<'static>> {
+    let key = (family.to_string(), css_weight);
+    if let Some(cached) = SYSTEM_FACES.lock().unwrap().get(&key) {
+        return *cached;
+    }
+    let db = with_system();
+    let query = fontdb::Query {
+        families: &[fontdb::Family::Name(family)],
+        weight: fontdb::Weight(css_weight),
+        ..Default::default()
+    };
+    let resolved = db
+        .query(&query)
+        .and_then(|id| {
+            db.with_face_data(id, |data, index| {
+                let bytes: &'static [u8] = Box::leak(data.to_vec().into_boxed_slice());
+                Face::parse(bytes, index).ok()
+            })
+            .flatten()
+        })
+        .map(|f| &*Box::leak(Box::new(f)));
+    SYSTEM_FACES.lock().unwrap().insert(key, resolved);
+    resolved
+}
+
 fn face(w: Weight) -> &'static Face<'static> {
     let t = &*TEXT;
-    let user = |u: &'static Option<Loaded>, embedded: &'static Face<'static>| match u {
-        Some(l) => &l.face,
-        None => embedded,
+    let pick = |file: &'static Option<Loaded>,
+                system: bool,
+                family: &str,
+                css_weight: u16,
+                embedded: &'static Face<'static>| {
+        if let Some(l) = file {
+            return &l.face;
+        }
+        if system {
+            if let Some(f) = system_face(family, css_weight) {
+                return f;
+            }
+        }
+        embedded
     };
     match w {
-        Weight::Mono => user(&t.user_mono, &t.mono),
-        Weight::Regular => user(&t.user_sans, &t.regular),
-        Weight::SemiBold => user(&t.user_sans, &t.semibold),
-        Weight::DisplayBold => user(&t.user_sans, &t.display_bold),
-        Weight::DisplaySemiBold => user(&t.user_sans, &t.display_semibold),
+        Weight::Mono => pick(&t.user_mono, t.mono_system, &t.mono_family, 400, &t.mono),
+        Weight::Regular => pick(&t.user_sans, t.sans_system, &t.sans_family, 400, &t.regular),
+        Weight::SemiBold => pick(
+            &t.user_sans,
+            t.sans_system,
+            &t.sans_family,
+            600,
+            &t.semibold,
+        ),
+        Weight::DisplayBold => pick(
+            &t.user_sans,
+            t.display_system,
+            &t.display_family,
+            700,
+            &t.display_bold,
+        ),
+        Weight::DisplaySemiBold => pick(
+            &t.user_sans,
+            t.display_system,
+            &t.display_family,
+            600,
+            &t.display_semibold,
+        ),
     }
 }
 
@@ -190,6 +263,15 @@ pub fn width(text: &str, size: f32, w: Weight) -> f32 {
 fn is_wide(ch: char) -> bool {
     use unicode_width::UnicodeWidthChar;
     ch.width() == Some(2)
+}
+
+/// True when the embedded database can resolve `family` on its own.
+pub fn embedded_has_family(family: &str) -> bool {
+    let query = fontdb::Query {
+        families: &[fontdb::Family::Name(family)],
+        ..Default::default()
+    };
+    EMBEDDED.query(&query).is_some()
 }
 
 /// True when every non-space character exists in the embedded sans face.
@@ -365,6 +447,15 @@ mod tests {
         let latin = width("iii", 16.0, Weight::Regular);
         let cjk = width("中", 16.0, Weight::Regular);
         assert!(latin < cjk);
+    }
+
+    #[test]
+    fn embedded_families_are_known() {
+        assert!(embedded_has_family(DEFAULT_SANS));
+        assert!(embedded_has_family(DEFAULT_DISPLAY));
+        assert!(embedded_has_family(DEFAULT_MONO));
+        // Not shipped with docp: must come from the system database.
+        assert!(!embedded_has_family("PingFang SC"));
     }
 
     #[test]

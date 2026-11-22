@@ -14,12 +14,15 @@ name = "terminal"
 [fonts]
 # Families used for pixel content (big-type headings, Mermaid labels).
 # These must be visible to the rasterizer: embedded fonts (Inter,
-# JetBrains Mono) or any font installed on the system.
+# JetBrains Mono) or any font installed on the system. A system family is
+# looked up through the system font database (fontconfig on Linux, the font
+# directories on macOS) and is also used for measurement, so heading wrapping
+# matches what is drawn.
 sans = "Inter"
 mono = "JetBrains Mono"
 
-# Optional font files. When set they win over the family names above and are
-# also used for measurement, so heading wrapping matches what is drawn.
+# Optional font files. When set they win over the family names above. A file
+# also pins exact metrics, which is handy when the system font may change.
 # Example:
 #   sans_file = "/Users/me/Library/Fonts/AtkinsonHyperlegible-Regular.ttf"
 #   mono_file = "/Users/me/Library/Fonts/Iosevka-Regular.ttf"
