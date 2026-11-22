@@ -357,9 +357,16 @@ pub fn font_resolver() -> usvg::FontResolver<'static> {
                 let mut score = 0u32;
                 let emoji_face = face.families.iter().any(|(f, _)| f.contains("Emoji"));
                 if is_emoji(c) {
-                    score += if emoji_face { 0 } else { 100 };
+                    score += if emoji_face { 0 } else { 1000 };
                 } else if emoji_face {
-                    score += 100;
+                    score += 1000;
+                } else if is_wide(c) {
+                    // With no family configured the base is Inter, which has no
+                    // CJK at all. Prefer the system's own CJK face over
+                    // whatever fontdb happens to list first (Hiragino, Apple SD
+                    // Gothic Neo, Arial Unicode…), so default headings look
+                    // like the rest of macOS.
+                    score += cjk_rank(face) * 100;
                 }
                 if face.style != base.style {
                     score += 20;
@@ -371,6 +378,22 @@ pub fn font_resolver() -> usvg::FontResolver<'static> {
             }
             best.map(|(_, id)| id)
         }),
+    }
+}
+
+/// Preference among system CJK faces, lower is better. Only consulted when the
+/// configured/inline font lacks the character (fallback).
+fn cjk_rank(face: &fontdb::FaceInfo) -> u32 {
+    let first = face.families.first().map(|(f, _)| f.as_str()).unwrap_or("");
+    match first {
+        "PingFang SC" => 0,
+        "PingFang TC" | "PingFang HK" | "PingFang MO" => 5,
+        "Hiragino Sans GB" => 10,
+        "Source Han Sans SC" | "Noto Sans CJK SC" => 15,
+        "Heiti SC" => 20,
+        // Korean glyph forms for Han characters, and fallback-only faces.
+        "Apple SD Gothic Neo" => 60,
+        _ => 30,
     }
 }
 
