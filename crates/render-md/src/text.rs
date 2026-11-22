@@ -706,6 +706,7 @@ fn wrap_pieces(pieces: &[highlight::Piece], width: usize, base: Attrs) -> Vec<Li
         attrs.fg = p.fg.or(base.fg);
         attrs.bold |= p.bold;
         attrs.italic |= p.italic;
+        attrs.underline |= p.underline;
         for ch in p.text.chars() {
             let cw = ch.width().unwrap_or(0);
             if col + cw > width && col > 0 {

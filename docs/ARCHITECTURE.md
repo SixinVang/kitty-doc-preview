@@ -47,7 +47,7 @@
 │ → 文本块(SGR) │ SVG→resvg          │ 文本层/大纲/链接/搜索      │
 │ Mermaid(QuickJS+resvg) │ 动图帧   │ 高亮矩形合成进 tile        │
 │ 大字标题光栅   │                    │ LRU+相邻页预取            │
-│ 代码高亮(syntect, 文本路径) │ 公式(typst, M2+)                  │
+│ 代码高亮(syntect+bat 语法) │ 公式(typst, M2+)                  │
 └───────────────┴────────────────────┴───────────────────────────┘
 ```
 
@@ -155,7 +155,7 @@ PNG/JPEG/WebP/GIF/BMP/TIFF + SVG（resvg）。
 | 块类型 | 路径 | 可搜索/复制 |
 |---|---|---|
 | 正文/列表/引用/行内样式 | 文本 + SGR | ✅ |
-| 代码块 | 文本 + syntect 高亮 | ✅ |
+| 代码块 | 文本 + syntect 高亮（bat 的 213 种语法，`two-face`；围栏名宽容解析：别名/扩展名/语法名/scope/shebang） | ✅ |
 | GFM 表格 | 文本 + box-drawing（CJK 对齐） | ✅ |
 | YAML frontmatter | 文本属性卡片（yaml-rust2 解析；嵌套键展平，坏 YAML 退回高亮代码块） | ✅ |
 | 链接 | OSC8 | ✅ |

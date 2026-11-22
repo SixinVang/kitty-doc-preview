@@ -128,6 +128,16 @@ fn main() -> Result<()> {
             "fonts: emoji={}",
             render_md::fonts::emoji_family().unwrap_or("(none)")
         );
+        let n = render_md::highlight::syntax_count();
+        println!(
+            "highlight: {} syntaxes{}",
+            n,
+            if n == 0 {
+                " (built without the `syntaxes` feature)"
+            } else {
+                ""
+            }
+        );
         return Ok(());
     }
 

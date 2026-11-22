@@ -107,6 +107,13 @@ and in the status bar.
   highlighted code stay real terminal text — searchable, copyable, tmux-safe.
   Only what a cell grid cannot express becomes pixels: H1/H2 display headings,
   Mermaid diagrams, and embedded images.
+- **Code blocks in 200+ languages.** Syntax definitions come from bat, so TOML,
+  Dockerfile, TypeScript, Nix, Protobuf, GraphQL and friends highlight properly,
+  not just the handful syntect ships. Fence names are resolved leniently
+  (`console`/`shell-session` → shell, `language-rs`, `rust,ignore`, shebangs in
+  unlabelled blocks), and the colors are mapped onto the terminal palette with
+  comments, strings, numbers, keywords, types, tags, attributes, escapes,
+  doc comments and diff markers each getting their own treatment.
 - **YAML frontmatter.** A `---` block at the top of a Markdown file renders as
   a compact properties card instead of leaking into the body: nested keys are
   flattened to `author.name`, lists join into one line, block scalars wrap
@@ -261,7 +268,7 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). Crates:
 | `termui` | /dev/tty, winsize ioctl, raw mode, timed query reads |
 | `docmodel` | `Row`/`Line`/`Cell` display model, SGR/OSC8 encoding, theme |
 | `render-img` | decode, viewport scale, cell-grid canvas, PNG tiles |
-| `render-md` | markdown blocks, text layout, syntect, big-type headings, Mermaid |
+| `render-md` | markdown blocks, text layout, syntect/two-face syntax highlight, big-type headings, Mermaid |
 | `render-pdf` | MuPDF open/page geometry, clipped band rasterisation |
 | `docp` | CLI, screen painter, image view, markdown view, PDF view, cat mode |
 
