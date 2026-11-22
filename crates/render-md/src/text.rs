@@ -46,7 +46,7 @@ impl Ctx<'_> {
                 });
                 vec![l]
             }
-            Node::Heading { level, spans } => {
+            Node::Heading { level, spans, .. } => {
                 let attrs = match level {
                     1..=3 => Attrs {
                         fg: Some(t.accent()),

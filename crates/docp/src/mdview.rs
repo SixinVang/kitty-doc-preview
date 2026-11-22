@@ -4,7 +4,7 @@
 use crate::caps::Caps;
 use crate::input::Input;
 use crate::screen::{Frame, Screen};
-use crate::{clipboard, ipc, srcmap};
+use crate::{clipboard, ipc, links, srcmap};
 use crossbeam_channel::{select, unbounded, Receiver, Sender};
 use crossterm::event::{
     Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind,
@@ -157,6 +157,17 @@ pub struct App {
 
     /// Mouse text selection in layout coordinates.
     selection: Option<Selection>,
+    /// Last mouse position, so `o` can follow the link under the pointer.
+    mouse: Option<Pos>,
+
+    /// Where link navigation came from: (path, top) pairs, newest last.
+    history: Vec<(PathBuf, usize)>,
+    /// The file `--ipc` was started for; editor sync only applies to it.
+    ipc_root: Option<PathBuf>,
+
+    /// Filesystem watcher, retargeted when a link opens another file.
+    watcher: notify::RecommendedWatcher,
+    watched_dir: PathBuf,
 
     /// Editor sync: byte↔line map of the last parse.
     lines: srcmap::LineMap,
@@ -192,6 +203,12 @@ pub fn run(
     let pele = pele::Pele::spawn(pele_tx);
 
     let (done_tx, done_rx) = unbounded();
+    let (fs_tx, fs_rx) = unbounded::<Vec<PathBuf>>();
+    let watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
+        if let Ok(ev) = res {
+            let _ = fs_tx.send(ev.paths);
+        }
+    })?;
     let (cw, ch) = (caps.cell.0.max(1) as u32, caps.cell.1.max(1) as u32);
     let mut screen = Screen::new(caps.clone(), theme.clone());
     let mut app = App {
@@ -230,6 +247,11 @@ pub fn run(
         message: None,
         message_until: None,
         selection: None,
+        mouse: None,
+        history: Vec::new(),
+        ipc_root: Some(path.clone()),
+        watcher,
+        watched_dir: PathBuf::new(),
         lines: srcmap::LineMap::default(),
         ipc: None,
         ipc_idle: None,
@@ -270,23 +292,7 @@ pub fn run(
 
     let input = Input::spawn()?;
 
-    let (fs_tx, fs_rx) = unbounded::<()>();
-    let file = path.clone();
-    let mut watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
-        if let Ok(ev) = res {
-            if ev
-                .paths
-                .iter()
-                .any(|p| p == &file || p.file_name() == file.file_name())
-            {
-                let _ = fs_tx.send(());
-            }
-        }
-    })?;
-    watcher.watch(
-        path.parent().unwrap_or(Path::new(".")),
-        notify::RecursiveMode::NonRecursive,
-    )?;
+    app.watch_dir(path.parent());
 
     app.reload(&mut screen);
     let result = app.event_loop(&mut screen, &input, fs_rx, pele_rx, done_rx, ipc_rx);
@@ -300,7 +306,7 @@ impl App {
         &mut self,
         screen: &mut Screen,
         input: &Input,
-        fs: Receiver<()>,
+        fs: Receiver<Vec<PathBuf>>,
         pele: Receiver<pele::Response>,
         done: Receiver<Done>,
         ipc_events: Receiver<ipc::Event>,
@@ -331,9 +337,11 @@ impl App {
                     Ok(ev) => quit |= self.on_input(screen, ev, &mut relayout, &mut repaint),
                     Err(_) => return Ok(()),
                 },
-                recv(fs) -> _ => {
-                    reload_at = Some(Instant::now() + DEBOUNCE);
-                    self.edit_started.get_or_insert_with(Instant::now);
+                recv(fs) -> ev => if let Ok(paths) = ev {
+                    if self.touched(&paths) {
+                        reload_at = Some(Instant::now() + DEBOUNCE);
+                        self.edit_started.get_or_insert_with(Instant::now);
+                    }
                 },
                 recv(pele) -> r => if let Ok(r) = r { self.on_pele(r); relayout = true; },
                 recv(done) -> d => if let Ok(d) = d { relayout |= self.on_done(d); },
@@ -345,8 +353,10 @@ impl App {
             while let Ok(ev) = events.try_recv() {
                 quit |= self.on_input(screen, ev, &mut relayout, &mut repaint);
             }
-            while fs.try_recv().is_ok() {
-                reload_at = Some(Instant::now() + DEBOUNCE);
+            while let Ok(paths) = fs.try_recv() {
+                if self.touched(&paths) {
+                    reload_at = Some(Instant::now() + DEBOUNCE);
+                }
             }
             while let Ok(r) = pele.try_recv() {
                 self.on_pele(r);
@@ -447,7 +457,7 @@ impl App {
             self.ipc_scroll = false;
         }
         match ev {
-            Event::Key(k) if k.kind != KeyEventKind::Release => self.key(k, repaint),
+            Event::Key(k) if k.kind != KeyEventKind::Release => self.key(screen, k, repaint),
             Event::Mouse(m) => {
                 match m.kind {
                     MouseEventKind::ScrollDown => self.scroll(3, repaint),
@@ -457,6 +467,7 @@ impl App {
                             return false; // status bar
                         }
                         let pos = self.pos_at(m.row, m.column);
+                        self.mouse = Some(pos);
                         self.selection = Some(Selection {
                             anchor: pos,
                             cursor: pos,
@@ -466,6 +477,7 @@ impl App {
                     }
                     MouseEventKind::Drag(MouseButton::Left) => {
                         let pos = self.pos_at(m.row, m.column);
+                        self.mouse = Some(pos);
                         if let Some(sel) = &mut self.selection {
                             if sel.cursor != pos {
                                 sel.cursor = pos;
@@ -474,11 +486,18 @@ impl App {
                         }
                     }
                     MouseEventKind::Up(MouseButton::Left) => {
+                        if m.row as usize >= self.view_height() {
+                            return false; // status bar
+                        }
+                        let pos = self.pos_at(m.row, m.column);
+                        self.mouse = Some(pos);
                         if let Some(mut sel) = self.selection {
                             if sel.dragging {
                                 sel.dragging = false;
                                 if sel.is_empty() {
                                     self.selection = None;
+                                    // A click (not a drag) on a link follows it.
+                                    self.follow_at(screen, pos, repaint);
                                 } else {
                                     self.selection = Some(sel);
                                     // Releasing the drag is the copy gesture;
@@ -514,7 +533,7 @@ impl App {
         }
     }
 
-    fn key(&mut self, k: KeyEvent, repaint: &mut bool) -> bool {
+    fn key(&mut self, screen: &mut Screen, k: KeyEvent, repaint: &mut bool) -> bool {
         let page = self.view_height() as isize;
         let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
         match k.code {
@@ -528,6 +547,15 @@ impl App {
                 self.copy_selection();
                 *repaint = true;
             }
+            KeyCode::Char('o') => {
+                let pos = self.selection.map(|s| s.anchor).or(self.mouse);
+                let followed = pos.is_some_and(|pos| self.follow_at(screen, pos, repaint));
+                if !followed {
+                    self.flash("no link under the cursor".into());
+                    *repaint = true;
+                }
+            }
+            KeyCode::Backspace => self.back(screen, repaint),
             KeyCode::Char('j') | KeyCode::Down | KeyCode::Enter => self.scroll(1, repaint),
             KeyCode::Char('k') | KeyCode::Up => self.scroll(-1, repaint),
             KeyCode::Char('d') => self.scroll(page / 2, repaint),
@@ -639,6 +667,207 @@ impl App {
     }
 
     // ---- document ----
+
+    /// Watch the directory holding the current document.
+    fn watch_dir(&mut self, dir: Option<&Path>) {
+        let dir = dir
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| PathBuf::from("."));
+        if self.watched_dir == dir {
+            return;
+        }
+        if !self.watched_dir.as_os_str().is_empty() {
+            let _ = self.watcher.unwatch(&self.watched_dir);
+        }
+        if self
+            .watcher
+            .watch(&dir, notify::RecursiveMode::NonRecursive)
+            .is_ok()
+        {
+            self.watched_dir = dir;
+        }
+    }
+
+    /// Whether a filesystem event concerns the document on screen.
+    fn touched(&self, paths: &[PathBuf]) -> bool {
+        paths.iter().any(|p| {
+            p == &self.path || (p.file_name().is_some() && p.file_name() == self.path.file_name())
+        })
+    }
+
+    /// A transient status-line message.
+    fn flash(&mut self, msg: String) {
+        self.message = Some(msg);
+        self.message_until = Some(Instant::now() + Duration::from_secs(3));
+    }
+
+    // ---- links ----
+
+    /// The link of the cell under a document position, if any.
+    fn link_at(&self, pos: Pos) -> Option<String> {
+        let Row::Text(line) = self.layout.get(pos.row)? else {
+            return None;
+        };
+        let mut col = 0usize;
+        for cell in &line.cells {
+            let width = docmodel::display_width(&cell.text);
+            if pos.col >= col && pos.col < col + width {
+                return cell.url.clone();
+            }
+            col += width;
+        }
+        None
+    }
+
+    /// Follow the link under `pos`; returns false when there is none.
+    fn follow_at(&mut self, screen: &mut Screen, pos: Pos, repaint: &mut bool) -> bool {
+        let Some(dest) = self.link_at(pos) else {
+            return false;
+        };
+        self.follow(screen, &dest, repaint);
+        true
+    }
+
+    /// Follow a link destination: an in-document anchor, another Markdown
+    /// file (navigates in place) or anything else (handed to the OS).
+    fn follow(&mut self, screen: &mut Screen, dest: &str, repaint: &mut bool) {
+        *repaint = true;
+        let base = self.path.parent().map(Path::to_path_buf);
+        match links::classify(dest, base.as_deref()) {
+            links::Target::Anchor(anchor) => {
+                if anchor.is_empty() {
+                    self.top = 0;
+                    self.follow = false;
+                } else if !self.jump_anchor(&anchor) {
+                    self.flash(format!("no heading #{anchor}"));
+                }
+            }
+            links::Target::External(url) => match links::open_external(&url) {
+                Ok(()) => self.flash(format!("opened {url}")),
+                Err(e) => self.flash(format!("can't open {url}: {e}")),
+            },
+            links::Target::File { path, anchor } => {
+                if !path.exists() {
+                    self.flash(format!("no such file: {}", path.display()));
+                    return;
+                }
+                if !links::is_markdown(&path) {
+                    match links::open_external(&path.to_string_lossy()) {
+                        Ok(()) => self.flash(format!("opened {}", path.display())),
+                        Err(e) => self.flash(format!("can't open {}: {e}", path.display())),
+                    }
+                    return;
+                }
+                if path != self.path {
+                    self.history.push((self.path.clone(), self.top));
+                }
+                self.open_path(screen, path, anchor, None);
+            }
+        }
+    }
+
+    /// Scroll to the heading whose anchor (or literal title) is `frag`.
+    fn jump_anchor(&mut self, frag: &str) -> bool {
+        let hit = self.doc.blocks.iter().enumerate().find_map(|(i, b)| {
+            let doc::Node::Heading { anchor, spans, .. } = &b.node else {
+                return None;
+            };
+            anchor_matches(anchor, &doc::plain(spans), frag).then_some(i)
+        });
+        let Some(i) = hit else {
+            return false;
+        };
+        let start = self.starts.get(i).copied().unwrap_or(0);
+        self.top = start.min(self.max_top());
+        self.follow = false;
+        true
+    }
+
+    /// Open a Markdown file in this pane, optionally at `anchor` or `top`.
+    fn open_path(
+        &mut self,
+        screen: &mut Screen,
+        path: PathBuf,
+        anchor: Option<String>,
+        top: Option<usize>,
+    ) {
+        let path = std::fs::canonicalize(&path).unwrap_or(path);
+        if path == self.path {
+            if let Some(a) = anchor {
+                if !self.jump_anchor(&a) {
+                    self.flash(format!("no heading #{a}"));
+                }
+            } else if let Some(top) = top {
+                self.top = top.min(self.max_top());
+            }
+            return;
+        }
+        // Free the previous document's pixel state before reusing the pane.
+        for m in self.media.values() {
+            kgp::delete(&mut self.out, m.id);
+        }
+        for block in self.img_blocks.values() {
+            for m in &block.tiles {
+                kgp::delete(&mut self.out, m.id);
+            }
+        }
+        self.media.clear();
+        self.img_blocks.clear();
+        self.diagrams.clear();
+        self.pele_tags.clear();
+        self.pending.clear();
+        self.wanted.clear();
+        self.stale.clear();
+        self.text_cache.clear();
+        self.changed.clear();
+        self.layout.clear();
+        self.starts.clear();
+        self.doc = doc::Doc { blocks: Vec::new() };
+        self.selection = None;
+        self.mouse = None;
+        self.follow = false;
+        self.top = 0;
+        self.path = path.clone();
+        self.name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        self.src_hash = None;
+        self.watch_dir(path.parent());
+        self.reload(screen);
+        if let Some(top) = top {
+            self.top = top.min(self.max_top());
+        }
+        if let Some(a) = anchor {
+            if !self.jump_anchor(&a) {
+                self.flash(format!("no heading #{a}"));
+            }
+        }
+        // The editor still edits the original file; do not report this one.
+        self.seen_top = self.top;
+        self.top_dirty = false;
+    }
+
+    fn back(&mut self, screen: &mut Screen, repaint: &mut bool) {
+        *repaint = true;
+        match self.history.pop() {
+            Some((path, top)) => self.open_path(screen, path, None, Some(top)),
+            None => self.flash("no previous document".into()),
+        }
+    }
+
+    /// Rewrite link cells for both the terminal and navigation: anchors stay
+    /// as `#fragment`, relative paths become absolute `file:` URLs.
+    fn localize_links(&self, lines: &mut [Line]) {
+        let base = self.path.parent();
+        for line in lines {
+            for cell in &mut line.cells {
+                if let Some(url) = cell.url.take() {
+                    cell.url = links::localize(&url, base);
+                }
+            }
+        }
+    }
 
     fn reload(&mut self, screen: &mut Screen) {
         let src = match std::fs::read_to_string(&self.path) {
@@ -823,7 +1052,7 @@ impl App {
         let block = &self.doc.blocks[i];
         let hash = block.hash;
         let kind = match &block.node {
-            doc::Node::Heading { level, spans } if *level <= 2 && self.graphics => {
+            doc::Node::Heading { level, spans, .. } if *level <= 2 && self.graphics => {
                 Kind::Heading(*level, doc::plain(spans))
             }
             doc::Node::Mermaid(src) if self.graphics => Kind::Mermaid(src.clone()),
@@ -987,16 +1216,12 @@ impl App {
     }
 
     fn resolve(&self, url: &str) -> Option<PathBuf> {
-        if url.starts_with("http://") || url.starts_with("https://") {
+        if links::is_external(url) {
             return None;
         }
-        let p = PathBuf::from(url);
-        if p.is_absolute() {
-            return p.exists().then_some(p);
-        }
-        let base = self.path.parent()?;
-        let joined = base.join(url.trim_start_matches("./"));
-        joined.exists().then_some(joined)
+        let (target, _) = links::split(url);
+        let path = links::resolve(target, self.path.parent());
+        path.exists().then_some(path)
     }
 
     fn text_rows(&mut self, i: usize, width: usize, used: &mut HashSet<(u64, usize)>) -> Vec<Row> {
@@ -1007,7 +1232,11 @@ impl App {
             Some(l) => l.clone(),
             None => {
                 let ctx = text::Ctx { theme: &self.theme };
-                let l = Arc::new(ctx.node(&block.node, width));
+                let mut l = ctx.node(&block.node, width);
+                // Resolve links once, against this document's directory; the
+                // cache is cleared when a link opens another file.
+                self.localize_links(&mut l);
+                let l = Arc::new(l);
                 self.text_cache.insert(key, l.clone());
                 l
             }
@@ -1161,7 +1390,11 @@ impl App {
                 self.emitted = None;
                 self.emit_at = None;
             }
-            ipc::Event::Sync { line } => *repaint |= self.apply_sync(line),
+            ipc::Event::Sync { line } => {
+                if self.ipc_root.as_ref() == Some(&self.path) {
+                    *repaint |= self.apply_sync(line);
+                }
+            }
             ipc::Event::Close | ipc::Event::Disconnected => {
                 if matches!(ev, ipc::Event::Close) {
                     if let Some(ipc) = &self.ipc {
@@ -1205,6 +1438,12 @@ impl App {
     /// Send the top block's source line, throttled and deduplicated.
     fn flush_top(&mut self) {
         self.emit_at = None;
+        // The editor edits `ipc_root`; after following a link elsewhere,
+        // reporting this document's lines would only confuse it.
+        if self.ipc_root.as_ref() != Some(&self.path) {
+            self.top_dirty = false;
+            return;
+        }
         if self.ipc.is_none() || self.ipc_scroll || !self.top_dirty {
             return;
         }
@@ -1344,6 +1583,18 @@ enum Kind {
     Text,
 }
 
+/// Whether a heading (already slugified `anchor` plus its plain title)
+/// matches a link fragment. GitHub strips a `user-content-` prefix on
+/// duplicate anchors, and hand-written anchors often use the raw title.
+fn anchor_matches(anchor: &str, title: &str, frag: &str) -> bool {
+    let raw = frag.trim();
+    let raw = raw.strip_prefix("user-content-").unwrap_or(raw);
+    let slug = doc::slugify(raw);
+    anchor.eq_ignore_ascii_case(raw)
+        || (!slug.is_empty() && anchor == slug)
+        || title.trim().eq_ignore_ascii_case(raw)
+}
+
 /// Text in display columns `[from, to)` of `line`.
 fn text_between(line: &Line, from: usize, to: usize) -> String {
     let mut out = String::new();
@@ -1432,6 +1683,120 @@ mod tests {
         let mut l = Line::default();
         l.cells.push(Cell::new(text, Attrs::default()));
         l
+    }
+
+    #[test]
+    fn anchors_match_slugs_titles_and_user_content_prefixes() {
+        assert!(anchor_matches("install", "Install", "install"));
+        assert!(anchor_matches("install", "Install", "Install"));
+        assert!(anchor_matches("install", "Install", "user-content-install"));
+        assert!(anchor_matches("install", "Install", "Install "));
+        assert!(anchor_matches("54-编辑器", "5.4 编辑器", "5.4 编辑器"));
+        assert!(!anchor_matches("install", "Install", "installing"));
+    }
+
+    #[test]
+    fn link_at_finds_the_cell_under_a_column() {
+        let mut line = line("see ");
+        line.cells.push(Cell {
+            text: "docs".into(),
+            attrs: Attrs::default(),
+            url: Some("file:///tmp/docs.md".into()),
+        });
+        let mut app = test_app();
+        app.layout = vec![Row::Text(line)];
+        assert_eq!(
+            app.link_at(Pos { row: 0, col: 4 }).as_deref(),
+            Some("file:///tmp/docs.md")
+        );
+        assert_eq!(app.link_at(Pos { row: 0, col: 2 }), None);
+        assert_eq!(app.link_at(Pos { row: 0, col: 20 }), None);
+        assert_eq!(app.link_at(Pos { row: 5, col: 0 }), None);
+    }
+
+    #[test]
+    fn internal_anchors_stay_out_of_osc8() {
+        let app = test_app();
+        let mut lines = vec![line("a")];
+        lines[0].cells[0].url = Some("#install".into());
+        app.localize_links(&mut lines);
+        assert_eq!(lines[0].cells[0].url.as_deref(), Some("#install"));
+        let mut s = String::new();
+        lines[0].encode_into(&mut s, 10);
+        assert!(!s.contains("\x1b]8;;#"), "{s:?}");
+    }
+
+    #[test]
+    fn relative_links_become_absolute_file_urls() {
+        let mut app = test_app();
+        app.path = PathBuf::from("/tmp/docs/notes.md");
+        let mut lines = vec![line("a")];
+        lines[0].cells[0].url = Some("../ARCH.md#54-rex".into());
+        app.localize_links(&mut lines);
+        let url = lines[0].cells[0].url.clone().unwrap();
+        assert!(url.starts_with("file:///tmp/"), "{url}");
+        assert!(url.ends_with("ARCH.md#54-rex"), "{url}");
+        assert!(url.contains("/tmp/ARCH.md"), "{url}");
+    }
+
+    fn test_app() -> App {
+        let dir = std::env::temp_dir();
+        let (fs_tx, _fs_rx) = unbounded::<Vec<PathBuf>>();
+        let watcher = notify::recommended_watcher(move |_: notify::Result<notify::Event>| {
+            let _ = fs_tx.send(Vec::new());
+        })
+        .unwrap();
+        let (done_tx, _done_rx) = unbounded();
+        let (pele_tx, _pele_rx) = unbounded();
+        App {
+            name: "notes.md".into(),
+            path: dir.join("notes.md"),
+            src_hash: None,
+            doc: doc::Doc { blocks: Vec::new() },
+            theme: Theme::dark_default(),
+            graphics: false,
+            cell: PixelCell { w: 8, h: 16 },
+            cols: 80,
+            rows: 24,
+            max_width: 110,
+            top: 0,
+            follow: false,
+            layout: Vec::new(),
+            starts: Vec::new(),
+            text_cache: HashMap::new(),
+            pele: pele::Pele::spawn(pele_tx),
+            pele_tags: HashMap::new(),
+            diagrams: HashMap::new(),
+            media: HashMap::new(),
+            img_blocks: HashMap::new(),
+            pending: HashSet::new(),
+            wanted: HashSet::new(),
+            stale: HashMap::new(),
+            done_tx,
+            changed: HashMap::new(),
+            settle_until: None,
+            cell_dirty: false,
+            edit_started: None,
+            latency: None,
+            message: None,
+            message_until: None,
+            selection: None,
+            mouse: None,
+            history: Vec::new(),
+            ipc_root: None,
+            watcher,
+            watched_dir: PathBuf::new(),
+            lines: srcmap::LineMap::default(),
+            ipc: None,
+            ipc_idle: None,
+            ipc_scroll: false,
+            top_dirty: false,
+            seen_top: 0,
+            emitted: None,
+            emit_at: None,
+            last_emit: None,
+            out: Vec::new(),
+        }
     }
 
     #[test]

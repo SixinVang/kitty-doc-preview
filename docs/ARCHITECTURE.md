@@ -158,7 +158,7 @@ PNG/JPEG/WebP/GIF/BMP/TIFF + SVG（resvg）。
 | 代码块 | 文本 + syntect 高亮（bat 的 213 种语法，`two-face`；围栏名宽容解析：别名/扩展名/语法名/scope/shebang） | ✅ |
 | GFM 表格 | 文本 + box-drawing（CJK 对齐） | ✅ |
 | YAML frontmatter | 文本属性卡片（yaml-rust2 解析；嵌套键展平，坏 YAML 退回高亮代码块） | ✅ |
-| 链接 | OSC8 | ✅ |
+| 链接 | 文内 `#标题` 锚点跳转（GitHub slug，重复加 `-1`）；相对路径转绝对 `file:` OSC8，`.md` 在同窗打开并可回退；其余交给系统 | ✅ |
 | H1/H2 大字标题 | 像素（内嵌 Inter/系统 CJK 字体光栅） | ❌（可切 `--flat-headings`） |
 | 图片 | 像素（内容哈希缓存，宽度自适应） | ❌ |
 | Mermaid | 像素：Pele(QuickJS 内嵌) 布局 → resvg 光栅 | ❌ |
@@ -271,8 +271,9 @@ n/p  pdf:下/上一页    1-9  跳到 10%..90%    z/Z 缩放(pdf)
 h/l  pdf:水平平移(缩放后)   option+j/k pdf:5 行瞬时跳转(不平滑)
 /   搜索   n/N 次匹配  t  目录(pdf)         o  打开链接
 y   复制选择(OSC52)    r  强制重载           ctrl-r 重绘
-+/-  md: 内容宽度      q  退出               ?  帮助浮层
-鼠标: 滚轮/拖选(松开即复制)/点击链接
++/-  md: 内容宽度      o  打开指针下的链接    backspace md: 返回上一文档
+q   退出               ?  帮助浮层
+鼠标: 滚轮/拖选(松开即复制)/单击链接跳转
 ```
 
 ## 9. watch / 跟随

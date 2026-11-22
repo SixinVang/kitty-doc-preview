@@ -5,6 +5,7 @@ mod config;
 mod imgview;
 mod input;
 mod ipc;
+mod links;
 mod mdview;
 mod pagedview;
 mod screen;

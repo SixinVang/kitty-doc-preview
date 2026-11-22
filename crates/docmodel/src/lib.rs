@@ -114,12 +114,19 @@ impl Line {
 
     /// Encode into `s`: SGR per cell, OSC 8 around url runs, `fill` pads to
     /// `width`. Does not truncate; layout is responsible for fitting.
+    ///
+    /// In-document anchors (`#heading`) never reach the terminal as OSC 8:
+    /// they only mean something inside the preview, which follows them on
+    /// click. They stay in `Cell::url` for that purpose.
     pub fn encode_into(&self, s: &mut String, width: usize) {
         let mut link: Option<&str> = None;
         for c in &self.cells {
-            if c.url.as_deref() != link {
-                s.push_str(&format!("\x1b]8;;{}\x1b\\", c.url.as_deref().unwrap_or("")));
-                link = c.url.as_deref();
+            let target = c.url.as_deref().filter(|u| !u.starts_with('#'));
+            if target != link {
+                s.push_str("\x1b]8;;");
+                s.push_str(target.unwrap_or(""));
+                s.push_str("\x1b\\");
+                link = target;
             }
             sgr(s, &c.attrs);
             s.push_str(&c.text);
@@ -289,5 +296,21 @@ mod tests {
         // the url run is closed before the non-url cell
         assert!(s.contains("b\x1b]8;;\x1b\\"));
         assert!(s.ends_with('c'));
+    }
+
+    #[test]
+    fn internal_anchors_are_not_osc8_links() {
+        let line = Line {
+            cells: vec![Cell {
+                text: "jump".into(),
+                attrs: Attrs::default(),
+                url: Some("#install".into()),
+            }],
+            fill: None,
+        };
+        let mut s = String::new();
+        line.encode_into(&mut s, 10);
+        assert!(!s.contains("\x1b]8;;#"), "{s:?}");
+        assert!(s.contains("jump"));
     }
 }

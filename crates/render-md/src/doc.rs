@@ -7,6 +7,7 @@
 use pulldown_cmark::{
     Alignment, BlockQuoteKind, CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd,
 };
+use std::collections::HashSet;
 use std::ops::Range;
 use xxhash_rust::xxh3::xxh3_64;
 use yaml_rust2::{Yaml, YamlLoader};
@@ -38,6 +39,9 @@ pub enum Align {
 pub enum Node {
     Heading {
         level: u8,
+        /// GitHub-style anchor for `[text](#anchor)` links, unique per
+        /// document (duplicates get `-1`, `-2`, …).
+        anchor: String,
         spans: Vec<Span>,
     },
     Para(Vec<Span>),
@@ -112,6 +116,36 @@ pub fn plain(spans: &[Span]) -> String {
     spans.iter().map(|s| s.text.as_str()).collect()
 }
 
+/// GitHub-style heading anchor: lowercased, whitespace turned into dashes and
+/// punctuation dropped. CJK characters are kept (GitHub does too), so
+/// `## 5.4 编辑器同步（Neovim + Rex）` becomes `54-编辑器同步neovim--rex`.
+pub fn slugify(title: &str) -> String {
+    let mut out = String::new();
+    for c in title.trim().chars() {
+        if c.is_alphanumeric() || c == '-' || c == '_' {
+            out.extend(c.to_lowercase());
+        } else if c.is_whitespace() {
+            out.push('-');
+        }
+    }
+    out
+}
+
+/// Append the smallest unused `-N` suffix, like GitHub's anchor dedupe.
+fn dedupe(anchor: String, used: &mut HashSet<String>) -> String {
+    if used.insert(anchor.clone()) {
+        return anchor;
+    }
+    let mut n = 1;
+    loop {
+        let candidate = format!("{anchor}-{n}");
+        if used.insert(candidate.clone()) {
+            return candidate;
+        }
+        n += 1;
+    }
+}
+
 enum Container {
     Root,
     Quote(Option<Alert>),
@@ -143,6 +177,7 @@ struct Builder<'a> {
     strike: u8,
     links: Vec<String>,
     images: Vec<String>,
+    anchors: HashSet<String>,
     para_image: Option<String>,
     para_chars: usize,
     image_chars: usize,
@@ -170,6 +205,7 @@ pub fn parse(src: &str) -> Doc {
         strike: 0,
         links: Vec::new(),
         images: Vec::new(),
+        anchors: HashSet::new(),
         para_image: None,
         para_chars: 0,
         image_chars: 0,
@@ -395,7 +431,21 @@ impl<'a> Builder<'a> {
             }
             TagEnd::Heading(_) => {
                 if let Some((InlineTarget::Heading(level), spans)) = self.inline.take() {
-                    self.push_node(Node::Heading { level, spans }, None);
+                    let slug = slugify(&plain(&spans));
+                    let slug = if slug.is_empty() {
+                        "section".to_string()
+                    } else {
+                        slug
+                    };
+                    let anchor = dedupe(slug, &mut self.anchors);
+                    self.push_node(
+                        Node::Heading {
+                            level,
+                            anchor,
+                            spans,
+                        },
+                        None,
+                    );
                 }
             }
             TagEnd::CodeBlock => {
@@ -699,6 +749,42 @@ mod tests {
         assert!(matches!(&d.blocks[0].node, Node::Image { url } if url == "shot.png"));
         let d = parse("see ![](shot.png) here\n");
         assert!(matches!(&d.blocks[0].node, Node::Para(_)));
+    }
+
+    #[test]
+    fn headings_get_github_style_anchors() {
+        let d = parse("# Hello, World!\n\n## 5.4 编辑器同步（Neovim + Rex）\n\n## Hello, World!\n");
+        let anchors: Vec<&str> = d
+            .blocks
+            .iter()
+            .filter_map(|b| match &b.node {
+                Node::Heading { anchor, .. } => Some(anchor.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            anchors,
+            vec!["hello-world", "54-编辑器同步neovim--rex", "hello-world-1"]
+        );
+    }
+
+    #[test]
+    fn slugify_drops_punctuation_only() {
+        assert_eq!(slugify("Install"), "install");
+        assert_eq!(slugify("A/B: c_d-e"), "ab-c_d-e");
+        assert_eq!(slugify("  "), "");
+    }
+
+    #[test]
+    fn links_keep_their_anchor_targets() {
+        let d = parse("[install](#install) and [arch](docs/ARCH.md#54-rex)\n");
+        match &d.blocks[0].node {
+            Node::Para(spans) => {
+                let urls: Vec<&str> = spans.iter().filter_map(|s| s.url.as_deref()).collect();
+                assert_eq!(urls, vec!["#install", "docs/ARCH.md#54-rex"]);
+            }
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]

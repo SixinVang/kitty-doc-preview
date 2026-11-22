@@ -98,6 +98,12 @@ sequenceDiagram
 
 **粗体**、*斜体*、~~删除线~~、`行内代码`、[链接](https://sw.kovidgoyal.net/kitty/graphics-protocol/)。
 
+## 链接与锚点
+
+- 文内锚点：[跳到内联样式](#内联样式)。
+- 相对路径：[架构文档](../docs/ARCHITECTURE.md)、[带锚点的架构文档](../docs/ARCHITECTURE.md#54-编辑器同步neovim--rex)。
+- 返回：`Backspace`（点击链接跳转后）。
+
 ---
 
 嵌套列表：

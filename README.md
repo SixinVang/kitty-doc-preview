@@ -91,9 +91,10 @@ max_width = 110              # text column clamp, in cells
 ```
 
 Keys: `j/k` scroll · `space/b` page · `d/u` half page · `g/G` top/bottom
-(`G` also follows the file) · `]`/`[` next/previous heading · `r` redraw ·
-`q` quit · mouse wheel, drag to select (release copies), `y` copy again,
-`Esc` clear selection.
+(`G` also follows the file) · `]`/`[` next/previous heading · `o` follow the
+link under the pointer · `Backspace` back to the previously opened document ·
+`r` redraw · `q` quit · mouse wheel, click a link to follow it, drag to select
+(release copies), `y` copy again, `Esc` clear selection.
 
 PDF adds: `n/p` (or `]`/`[`) next/previous page · `1`–`9` jump to 10 %…90 % ·
 `z`/`Z` zoom in/out (re-rasterised, never upscaled) · `h/l` pan when zoomed ·
@@ -107,6 +108,12 @@ and in the status bar.
   highlighted code stay real terminal text — searchable, copyable, tmux-safe.
   Only what a cell grid cannot express becomes pixels: H1/H2 display headings,
   Mermaid diagrams, and embedded images.
+- **Links work like links.** `[text](#install)` jumps to that heading (GitHub
+  slug rules, duplicate anchors get `-1`, `-2`, …), and
+  `[text](docs/ARCH.md#54-editor)` opens that Markdown file in the same pane at
+  the anchored heading, `Backspace` going back. Other relative paths and `http:`
+  URLs open with the OS; external links also carry an OSC 8 hyperlink, while
+  in-document anchors stay internal.
 - **Code blocks in 200+ languages.** Syntax definitions come from bat, so TOML,
   Dockerfile, TypeScript, Nix, Protobuf, GraphQL and friends highlight properly,
   not just the handful syntect ships. Fence names are resolved leniently
